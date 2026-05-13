@@ -233,8 +233,8 @@ pub fn hamiltonian_map(
                     [x[27], x[28], x[29]]];
 
     // Normalised potential partials
-    let du_dr_norm: Vec3 = scale_v(1.0 / (nr * beta),    du_dr_n);   // ÷ nr·nm·nt²
-    let m_norm    : Vec3 = scale_v(1.0 / (alpha * nt*nt), m_n);       // ÷ nm·nr²·nt²
+    let du_dr_norm: Vec3 = scale_v(1.0 / beta,            du_dr_n);   // ÷ nm·nr·nt²  (force scale)
+    let m_norm    : Vec3 = scale_v(1.0 / (alpha * nt*nt), m_n);       // ÷ nm·nr²·nt² (torque scale)
 
     let ia = params.ia;
     let ib = params.ib;
@@ -276,7 +276,7 @@ pub fn hamiltonian_map(
     let r_n1_phys: Vec3 = scale_v(nr, r_n1);    // de-normalise for the potential call
     let (du_dr_n1, m_n1) = map_potential_partials_lgvi(c_n1, r_n1_phys, params);
 
-    let du_dr_n1_norm: Vec3 = scale_v(1.0 / (nr * beta),    du_dr_n1);
+    let du_dr_n1_norm: Vec3 = scale_v(1.0 / beta,            du_dr_n1);
     let m_n1_norm    : Vec3 = scale_v(1.0 / (alpha * nt*nt), m_n1);
 
     // ── propagate velocity ───────────────────────────────────────────────

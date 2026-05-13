@@ -87,7 +87,7 @@ os.makedirs("output_x", exist_ok=True)
 try:
     import gubas_rs          # maturin-built Python extension
     gubas_rs.run()
-except ImportError:
+except (ImportError, AttributeError):
     # Fall back to the standalone binary
     binary = os.path.join(REPO_ROOT, "gubas_rs", "target", "release", "hou_cpp_final")
     if not os.path.isfile(binary):
