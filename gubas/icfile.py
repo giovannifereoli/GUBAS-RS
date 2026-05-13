@@ -30,7 +30,7 @@ def write_icfile(
         tet_file_a, vert_file_a,
         tet_file_b, vert_file_b,
     ]
-    lines += [repr(v) for v in x0]
+    lines += [repr(float(v)) for v in x0]
     lines += [
         repr(tgen), repr(integ), repr(h), repr(tol),
         repr(flyby_toggle), repr(helio_toggle), repr(sg_toggle), repr(tt_toggle),
