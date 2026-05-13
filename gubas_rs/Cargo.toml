@@ -1,0 +1,22 @@
+[package]
+name = "gubas_rs"
+version = "0.1.0"
+edition = "2021"
+
+# cdylib  → Python extension module (maturin / pyo3)
+# rlib    → lets the [[bin]] target link against the lib
+[lib]
+name = "gubas_rs"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "hou_cpp_final"
+path = "src/main.rs"
+
+[features]
+default = []
+# Enable the Python extension. Activated automatically by maturin via pyproject.toml.
+extension-module = ["dep:pyo3"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module"], optional = true }
