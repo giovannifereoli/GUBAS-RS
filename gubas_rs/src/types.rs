@@ -127,6 +127,7 @@ impl Cube<f64> {
 /// Generic over `T` (defaults to `f64`) so that dual-number types can replace
 /// f64 for auto-differentiation.  Only the physics fields that appear in
 /// differentiated expressions are `T`; toggles and orbit parameters stay `f64`.
+#[derive(Clone)]
 pub struct Params<T = f64> {
     // Gravity & masses
     pub g: T,

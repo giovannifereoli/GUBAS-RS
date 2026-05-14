@@ -718,6 +718,312 @@ pub fn write_phi_t_bin(dir: &str, times: &[f64]) -> std::io::Result<()> {
     Ok(())
 }
 
+// ── Augmented STM propagator ─────────────────────────────────────────────────
+//
+// Propagates the full (30+N)×(30+N) augmented STM Φ_aug alongside the
+// trajectory.  State z = [x(30); θ(N)], θ̇ = 0 (constant parameters).
+//
+// Φ_aug structure (written to phi_aug_out.bin):
+//   ┌─────────────────────────────────┐
+//   │  Φ_xx (30×30)  │  Φ_xθ (30×N) │
+//   │─────────────────│──────────────│
+//   │  0     (N×30)  │  I_N  (N×N)  │
+//   └─────────────────────────────────┘
+// Top rows are propagated; bottom rows are trivially [0|I] (θ̇=0).
+//
+// Point-evaluation interface (for external OD filters / scipy):
+//   eval_aug_dynamics_and_jacobian(x, θ, t, aug_ode_dual) → (ż, A_aug_flat)
+//   augmented_state_ode_rhs(z_phi_flat, t, aug_ode_dual)  → full ODE RHS
+
+/// Compute [A (30×30), B (30×N)] from one augmented dual-ODE call per column.
+/// A[i][j] = ∂f_i/∂x_j,   B[i][k] = ∂f_i/∂θ_k.
+pub fn jacobian_aug_ad<FD>(
+    x:             &[f64; 30],
+    theta:         &[f64],       // N parameters
+    t:             f64,
+    aug_ode_dual:  &FD,
+) -> (Phi, Vec<[f64; 30]>)       // (A, B) — B[k] is a 30-vector, the k-th column
+where
+    FD: Fn(&[Dual], f64) -> Vec<Dual>,
+{
+    let n_theta = theta.len();
+    let n_aug   = 30 + n_theta;
+
+    // Seed point: re-part is [x; theta], eps = 0 everywhere
+    let mut zd: Vec<Dual> = Vec::with_capacity(n_aug);
+    for &v in x.iter()     { zd.push(Dual::from_re(v)); }
+    for &v in theta.iter() { zd.push(Dual::from_re(v)); }
+
+    let mut a   = phi_zero();
+    let mut b   = vec![[0.0_f64; 30]; n_theta];
+
+    // Columns 0..30 → A
+    for j in 0..30 {
+        zd[j].eps = 1.0;
+        let fd = aug_ode_dual(&zd, t);
+        for i in 0..30 { a[i][j] = fd[i].eps; }
+        zd[j].eps = 0.0;
+    }
+    // Columns 30..30+N → B
+    for k in 0..n_theta {
+        zd[30 + k].eps = 1.0;
+        let fd = aug_ode_dual(&zd, t);
+        for i in 0..30 { b[k][i] = fd[i].eps; }
+        zd[30 + k].eps = 0.0;
+    }
+    (a, b)
+}
+
+/// Propagate state + full augmented STM Φ_aug with RK7(8) adaptive.
+///
+/// Φ_aug is (30+N)×(30+N): top rows [Φ_xx | Φ_xθ] are propagated;
+/// bottom rows [0 | I_N] are trivial (θ̇ = 0) and restored at output.
+///
+/// # Returns
+/// `(times, x_states, phi_aug_flat_history)` where
+/// `phi_aug_flat[step]` has (30+N)² elements, row-major, so in Python:
+/// `phi_aug = np.fromfile(...).reshape(-1, 30+N, 30+N)`
+pub fn propagate_augmented_rk87_ad<F, FD>(
+    x0:           [f64; 30],
+    theta0:       Vec<f64>,
+    t0:           f64,
+    tf:           f64,
+    tol:          f64,
+    ode:          F,
+    aug_ode_dual: FD,
+    out_freq:     usize,
+) -> (Vec<f64>, Vec<[f64; 30]>, Vec<Vec<f64>>)  // (times, states, phi_aug_flat)
+where
+    F:  Fn([f64; 30], f64) -> [f64; 30],
+    FD: Fn(&[Dual], f64) -> Vec<Dual>,
+{
+    const EPS: f64 = 5e-16;
+    const POW: f64 = 1.0 / 8.0;
+    let n_theta  = theta0.len();
+    let n_aug    = 30 + n_theta;
+    let out_freq = out_freq.max(1);
+
+    let hmax = (tf - t0) / 2.5;
+    let mut h = ((tf - t0) / 50.0).min(0.1).min(hmax);
+
+    let mut t      = t0;
+    let mut x      = x0;
+    let theta      = theta0.clone();
+    let mut phi_xx = phi_eye();
+    let mut phi_xt = vec![0.0_f64; 30 * n_theta]; // Φ_xθ(t₀) = 0
+
+    let mut times   = vec![t];
+    let mut states  = vec![x];
+    let mut phi_aug_h = vec![assemble_phi_aug(&phi_xx, &phi_xt, n_theta)];
+
+    let mut n_accepted = 0usize;
+    let mut n_rejected = 0usize;
+
+    while t < tf {
+        if t + h > tf { h = tf - t; }
+
+        let mut kx   = vec![[0.0_f64; 30]; 13];
+        let mut kphi = vec![phi_zero(); 13];
+        let mut kpxt = vec![vec![0.0_f64; 30 * n_theta]; 13];
+
+        // Stage 0
+        kx[0] = ode(x, t);
+        let (a0, b0) = jacobian_aug_ad(&x, &theta, t, &aug_ode_dual);
+        kphi[0] = phi_mul(&a0, &phi_xx);
+        kpxt[0] = phi_xt_dot(&a0, &b0, &phi_xt, n_theta);
+
+        // Stages 1..12
+        for j in 1..=12_usize {
+            let mut xj   = x;
+            let mut phij = phi_xx;
+            let mut pxtj = phi_xt.clone();
+            for i in 0..j {
+                let a = DP_A[j - 1][i];
+                if a == 0.0 { continue; }
+                for k in 0..30 { xj[k] += h * a * kx[i][k]; }
+                for r in 0..30 { for c in 0..30 { phij[r][c] += h * a * kphi[i][r][c]; }}
+                for q in 0..(30 * n_theta) { pxtj[q] += h * a * kpxt[i][q]; }
+            }
+            let tj = t + DP_C[j - 1] * h;
+            kx[j] = ode(xj, tj);
+            let (aj, bj) = jacobian_aug_ad(&xj, &theta, tj, &aug_ode_dual);
+            kphi[j] = phi_mul(&aj, &phij);
+            kpxt[j] = phi_xt_dot(&aj, &bj, &pxtj, n_theta);
+        }
+
+        // 7th order solution
+        let mut x7   = x;
+        let mut p7   = phi_xx;
+        let mut pxt7 = phi_xt.clone();
+        for i in 0..13 {
+            let b7 = DP_B7[i];
+            if b7 == 0.0 { continue; }
+            for k in 0..30 { x7[k] += h * b7 * kx[i][k]; }
+            for r in 0..30 { for c in 0..30 { p7[r][c] += h * b7 * kphi[i][r][c]; }}
+            for q in 0..(30 * n_theta) { pxt7[q] += h * b7 * kpxt[i][q]; }
+        }
+
+        // 8th order (error estimate on x only)
+        let mut x8 = x;
+        for i in 0..13 {
+            let b8 = DP_B8[i]; if b8 == 0.0 { continue; }
+            for k in 0..30 { x8[k] += h * b8 * kx[i][k]; }
+        }
+
+        let err = (0..30).map(|k| (x8[k] - x7[k]).abs()).fold(0.0_f64, f64::max);
+        let tau = tol * (0..30).map(|k| x[k].abs()).fold(0.0_f64, f64::max);
+
+        if err <= tau {
+            x      = x7;
+            phi_xx = p7;
+            phi_xt = pxt7;
+            t     += h;
+            n_accepted += 1;
+            if n_accepted % out_freq == 0 || (tf - t).abs() < 1e-14 * h {
+                times.push(t);
+                states.push(x);
+                phi_aug_h.push(assemble_phi_aug(&phi_xx, &phi_xt, n_theta));
+            }
+        } else {
+            n_rejected += 1;
+        }
+
+        let err_s = if err == 0.0 { 10.0 * EPS } else { err };
+        let tau_s = tau.max(tol * EPS);
+        h = hmax.min(0.9 * h * (tau_s / err_s).powf(POW));
+        if h.abs() <= EPS {
+            eprintln!("propagate_augmented_rk87_ad: step size at machine precision");
+            break;
+        }
+    }
+    eprintln!("  rk87_aug: {} accepted + {} rejected steps, N_aug={}", n_accepted, n_rejected, n_aug);
+    (times, states, phi_aug_h)
+}
+
+/// Φ̇_xθ = A · Φ_xθ + B  (flattened, row-major by state index).
+fn phi_xt_dot(a: &Phi, b_cols: &[[f64; 30]], phi_xt: &[f64], n_theta: usize) -> Vec<f64> {
+    let mut out = vec![0.0_f64; 30 * n_theta];
+    for i in 0..30 {
+        for k in 0..n_theta {
+            let apxt: f64 = (0..30).map(|j| a[i][j] * phi_xt[j * n_theta + k]).sum();
+            out[i * n_theta + k] = apxt + b_cols[k][i];
+        }
+    }
+    out
+}
+
+/// Assemble the full (30+N)×(30+N) Φ_aug from Φ_xx and Φ_xθ.
+/// Bottom rows are [0 | I_N] (trivial since θ̇ = 0).
+pub fn assemble_phi_aug(phi_xx: &Phi, phi_xt: &[f64], n_theta: usize) -> Vec<f64> {
+    let n_aug = 30 + n_theta;
+    let mut out = vec![0.0_f64; n_aug * n_aug];
+    // Top-left: Φ_xx
+    for i in 0..30 { for j in 0..30 { out[i * n_aug + j] = phi_xx[i][j]; } }
+    // Top-right: Φ_xθ  (phi_xt[i*n_theta + k] = Φ_xθ[i][k])
+    for i in 0..30 { for k in 0..n_theta { out[i * n_aug + 30 + k] = phi_xt[i * n_theta + k]; } }
+    // Bottom-right: I_N
+    for k in 0..n_theta { out[(30 + k) * n_aug + 30 + k] = 1.0; }
+    out
+}
+
+// ── Point-evaluation interface for external OD filters ────────────────────────
+
+/// Evaluate augmented dynamics ż and Jacobian A_aug at (z, t).
+/// z = [x(30); θ(N)].  Returns:
+///   - ż        : Vec of length 30+N   (θ̇ = 0 for last N entries)
+///   - A_aug_flat: Vec of length (30+N)²  (row-major)
+///     A_aug = | A  B |   A[i][j]=∂f_i/∂x_j,   B[i][k]=∂f_i/∂θ_k
+///             | 0  0 |
+pub fn eval_aug_dynamics_and_jacobian<FD>(
+    x:            &[f64; 30],
+    theta:        &[f64],
+    t:            f64,
+    aug_ode_dual: &FD,
+) -> (Vec<f64>, Vec<f64>)
+where
+    FD: Fn(&[Dual], f64) -> Vec<Dual>,
+{
+    let n_theta = theta.len();
+    let n_aug   = 30 + n_theta;
+
+    // zdot (re-parts of aug_ode_dual at eps=0)
+    let zd: Vec<Dual> = x.iter().chain(theta.iter())
+        .map(|&v| Dual::from_re(v)).collect();
+    let zdot_dual = aug_ode_dual(&zd, t);
+    let zdot: Vec<f64> = zdot_dual.iter().map(|d| d.re).collect();
+
+    // Jacobians A and B
+    let (a, b_cols) = jacobian_aug_ad(x, theta, t, aug_ode_dual);
+
+    // Assemble A_aug (n_aug × n_aug, row-major)
+    let mut a_aug = vec![0.0_f64; n_aug * n_aug];
+    for i in 0..30 {
+        for j in 0..30 { a_aug[i * n_aug + j]      = a[i][j]; }
+        for k in 0..n_theta { a_aug[i * n_aug + 30 + k] = b_cols[k][i]; }
+    }
+    (zdot, a_aug)
+}
+
+/// Augmented state + STM ODE RHS for external numerical integration (scipy etc.).
+///
+/// Input `z_phi_flat` has (30+N) + (30+N)² elements:
+///   z_phi_flat[..30+N]   = z = [x; θ]
+///   z_phi_flat[30+N..]   = Φ_aug flattened row-major, (30+N)×(30+N)
+///
+/// Returns same layout: [ż; A_aug · Φ_aug].
+/// Initialize with z=[x₀; θ₀] and Φ_aug = I_{30+N}.
+pub fn augmented_state_ode_rhs<FD>(
+    z_phi_flat:   &[f64],
+    t:            f64,
+    aug_ode_dual: &FD,
+) -> Vec<f64>
+where
+    FD: Fn(&[Dual], f64) -> Vec<Dual>,
+{
+    // Recover n_aug: n_aug² + n_aug = len → n_aug = (√(1+4·len) - 1)/2
+    let len = z_phi_flat.len();
+    let n_aug = (((-1.0 + (1.0 + 4.0 * len as f64).sqrt()) / 2.0).round()) as usize;
+    let _n_theta = n_aug - 30;
+
+    let z        = &z_phi_flat[..n_aug];
+    let phi_flat = &z_phi_flat[n_aug..];
+    let x: [f64; 30] = z[..30].try_into().unwrap();
+    let theta = &z[30..];
+
+    let (zdot, a_aug) = eval_aug_dynamics_and_jacobian(&x, theta, t, aug_ode_dual);
+
+    // Φ̇_aug = A_aug · Φ_aug  (n_aug × n_aug matmul)
+    let mut phi_dot = vec![0.0_f64; n_aug * n_aug];
+    for i in 0..n_aug {
+        for k in 0..n_aug {
+            if a_aug[i * n_aug + k] == 0.0 { continue; }
+            for j in 0..n_aug {
+                phi_dot[i * n_aug + j] += a_aug[i * n_aug + k] * phi_flat[k * n_aug + j];
+            }
+        }
+    }
+
+    let mut out = Vec::with_capacity(len);
+    out.extend_from_slice(&zdot);
+    out.extend_from_slice(&phi_dot);
+    out
+}
+
+// ── Binary I/O for augmented output ──────────────────────────────────────────
+
+/// Write Φ_aug history to `{dir}/phi_aug_out.bin` (little-endian f64).
+/// Shape: (nsteps, 30+N, 30+N), row-major.
+/// Read in Python: `np.fromfile(..., "<f8").reshape(-1, n_aug, n_aug)`.
+pub fn write_phi_aug_bin(dir: &str, phi_augs: &[Vec<f64>]) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let mut f = std::io::BufWriter::new(
+        std::fs::File::create(format!("{}/phi_aug_out.bin", dir))?);
+    for pa in phi_augs {
+        for &v in pa { f.write_all(&v.to_le_bytes())?; }
+    }
+    Ok(())
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

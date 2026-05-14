@@ -10,6 +10,7 @@ pub mod math3;
 pub mod orbit;
 pub mod potential;
 pub mod stm;
+pub mod stokes;
 pub mod types;
 
 use coefficients::{a_calc, b_calc, tk_calc};
@@ -385,6 +386,182 @@ pub fn run_stm() {
     println!("  Written xdot_out.bin and A_out.bin to output_phi/");
 }
 
+// ── run_stm_augmented ─────────────────────────────────────────────────────────
+
+/// Propagate trajectory + STM (Φ_xx) + inertia-parameter sensitivity (Φ_xθ).
+///
+/// θ = all T_{ijk} entries for the selected body at degrees [min_degree, max_degree].
+/// The augmented state is z = [x(30); θ(N)], with θ̇ = 0 (parameters constant).
+///
+/// # Arguments
+/// * `min_degree`, `max_degree` — harmonic degree range (e.g. 2, 2 for degree-2 only)
+/// * `which_body`               — 0 = primary T_a,  1 = secondary T_b
+///
+/// # Output — written to `output_phi_aug/`
+/// * `phi_out.bin`     — Φ_xx (30×30) STM history,   (nsteps, 30, 30) f64 LE
+/// * `phi_xt_out.bin`  — Φ_xθ (30×N) sensitivity,    (nsteps, 30, N)  f64 LE
+/// * `phi_t_out.bin`   — times,                       (nsteps,)        f64 LE
+/// * `x_out.bin`       — state trajectory,            (nsteps, 30)     f64 LE
+/// * `theta_indices.txt` — (i j k) lines for column ordering of Φ_xθ
+/// * `stokes_out.txt`    — C/S Stokes coefficients at t₀ (for reference radius r0)
+pub fn run_stm_augmented(min_degree: usize, max_degree: usize, which_body: usize) {
+    use dual::Dual;
+    use dynamics::hou_ode;
+    use stm::{propagate_augmented_rk87_ad, write_phi_aug_bin, write_phi_bin,
+              write_phi_t_bin, write_x_bin};
+    use stokes::{inertia_indices, nijk_to_clm_slm, Normalization};
+    use types::promote_params;
+
+    let ics = ic_read();
+
+    let mut order   = ics.order;
+    let mut order_a = ics.order_a;
+    let mut order_b = ics.order_b;
+    if ics.a_shape == 2 { order_a = order_a.max(order); }
+    if ics.b_shape == 2 { order_b = order_b.max(order); }
+    order = order.max(order_a).max(order_b);
+
+    let ta = Cube::load_csv(&format!("TDP_{}.csv", order))
+        .expect("TDP csv not found — run with Tgen=1 first");
+    let tb = Cube::load_csv(&format!("TDS_{}.csv", order))
+        .expect("TDS csv not found — run with Tgen=1 first");
+    let ia = load_moi_csv("IDP.csv").expect("IDP csv not found");
+    let ib = load_moi_csv("IDS.csv").expect("IDS csv not found");
+
+    let tk = tk_calc(order);
+    let a  = a_calc(order);
+    let b  = b_calc(order);
+
+    let mc = ta.get(0, 0, 0);
+    let ms = tb.get(0, 0, 0);
+    let m  = mc * ms / (mc + ms);
+    let nu = ms / (mc + ms);
+    let mean_motion = (ics.g * (ics.msun + mc + ms)
+                       / (ics.sol_rad * ics.au_def / 1000.0).powi(3)).sqrt();
+    let n_hyp   = (ics.g * ics.mplanet / ics.a_hyp.abs().powi(3)).sqrt();
+    let n_helio = (ics.g * ics.msolar  / ics.a_helio.abs().powi(3)).sqrt();
+
+    let mut params = Params {
+        g: ics.g, m, nu, ta, tb, ia, ib,
+        n: order, tk, a, b,
+        flyby_toggle: ics.flyby_toggle,
+        helio_toggle: ics.helio_toggle,
+        sg_toggle:    ics.sg_toggle,
+        tt_toggle:    ics.tt_toggle,
+        mplanet:   ics.mplanet,
+        a_hyp:     ics.a_hyp, e_hyp: ics.e_hyp, i_hyp: ics.i_hyp,
+        raan_hyp:  ics.raan_hyp, om_hyp: ics.om_hyp, tau_hyp: ics.tau_hyp, n_hyp,
+        msolar:    ics.msolar,
+        a_helio:   ics.a_helio, e_helio: ics.e_helio, i_helio: ics.i_helio,
+        raan_helio: ics.raan_helio, om_helio: ics.om_helio, tau_helio: ics.tau_helio, n_helio,
+        sol_rad: ics.sol_rad, au_def: ics.au_def, mean_motion,
+        love1: ics.love1, love2: ics.love2,
+        refrad1: ics.refrad1, refrad2: ics.refrad2,
+        rho_a: ics.rho_a, rho_b: ics.rho_b,
+        eps1: ics.eps1, eps2: ics.eps2,
+        ida: math3::ZERO_M, idb: math3::ZERO_M,
+        msun: ics.msun,
+    };
+    params.compute_lgvi_inertia();
+
+    // ── Select θ indices: all T_{ijk} at the requested degrees ───────────────
+    let theta_indices = inertia_indices(min_degree, max_degree);
+    let n_theta = theta_indices.len();
+
+    let theta0: Vec<f64> = theta_indices.iter().map(|&(i, j, k)| {
+        if which_body == 0 { params.ta.get(i, j, k) } else { params.tb.get(i, j, k) }
+    }).collect();
+
+    println!("Augmented STM propagation:");
+    println!("  Body: {}, degrees [{}, {}], N_theta = {}",
+             if which_body == 0 { "primary" } else { "secondary" },
+             min_degree, max_degree, n_theta);
+    println!("  [Each stage: {} dual ODE evals for augmented Jacobian]", 30 + n_theta);
+
+    // ── Promote params to Dual once, stored for cloning in the closure ────────
+    let params_dual_base = promote_params::<Dual>(&params);
+
+    // ── Build augmented dual ODE closure ─────────────────────────────────────
+    let theta_indices_clone = theta_indices.clone();
+    let aug_ode_dual = move |z: &[Dual], t: f64| -> Vec<Dual> {
+        // Clone base Dual params and patch the θ entries with values from z[30..]
+        let mut pd = params_dual_base.clone();
+        for (k, &(ii, jj, kk)) in theta_indices_clone.iter().enumerate() {
+            if which_body == 0 {
+                pd.ta.set(ii, jj, kk, z[30 + k]);
+            } else {
+                pd.tb.set(ii, jj, kk, z[30 + k]);
+            }
+        }
+        let mut x = [Dual::from_re(0.0); 30];
+        for i in 0..30 { x[i] = z[i]; }
+        let xdot = hou_ode(x, t, &pd);
+        let mut zdot = vec![Dual::from_re(0.0); 30 + theta_indices_clone.len()];
+        for i in 0..30 { zdot[i] = xdot[i]; }
+        zdot
+    };
+
+    // f64 ODE (trajectory only — theta is constant)
+    let ode = |x: [f64; 30], t: f64| hou_ode(x, t, &params);
+
+    // ── Propagate ─────────────────────────────────────────────────────────────
+    let (ts, xs, phi_augs) = propagate_augmented_rk87_ad(
+        ics.x0, theta0, ics.t0, ics.tf, ics.tol,
+        ode, aug_ode_dual, 1,
+    );
+    println!("  {} snapshots, Φ_aug shape ({}, {})", ts.len(), 30+n_theta, 30+n_theta);
+
+    // ── Write output ──────────────────────────────────────────────────────────
+    let dir = "output_phi_aug";
+    write_phi_aug_bin(dir, &phi_augs).expect("write phi_aug");
+    write_phi_t_bin(dir, &ts).expect("write phi_t");
+    write_x_bin(dir, &xs).expect("write x");
+    // Also write Φ_xx (top-left 30×30 block) as standard phi_out.bin for compatibility
+    let phi_xxs: Vec<stm::Phi> = phi_augs.iter().map(|pa| {
+        let n_aug = 30 + n_theta;
+        let mut pxx = stm::phi_zero();
+        for i in 0..30 { for j in 0..30 { pxx[i][j] = pa[i * n_aug + j]; } }
+        pxx
+    }).collect();
+    write_phi_bin(dir, &phi_xxs).expect("write phi_xx");
+
+    // theta index legend
+    {
+        use std::io::Write;
+        let mut f = std::io::BufWriter::new(
+            std::fs::File::create(format!("{}/theta_indices.txt", dir)).unwrap());
+        writeln!(f, "# k  i  j  k_idx  (T_a[i][j][k_idx] entries, degree l=i+j+k)").unwrap();
+        for (k, &(ii, jj, kk)) in theta_indices.iter().enumerate() {
+            writeln!(f, "{} {} {} {}", k, ii, jj, kk).unwrap();
+        }
+    }
+
+    // Stokes at t₀ — use max semi-axis of body as reference radius
+    let (body_ta, body_mass) = if which_body == 0 {
+        (&params.ta, params.ta.get(0,0,0))
+    } else {
+        (&params.tb, params.tb.get(0,0,0))
+    };
+    // Reference radius: rough mean radius from MOI (no explicit r0 in params; use 1 km)
+    let r0 = 1.0_f64; // km — user should rescale in post-processing
+    let cs = nijk_to_clm_slm(body_ta, body_mass, r0, max_degree, Normalization::Unnormalized);
+    {
+        use std::io::Write;
+        let mut f = std::io::BufWriter::new(
+            std::fs::File::create(format!("{}/stokes_out.txt", dir)).unwrap());
+        writeln!(f, "# Unnormalized Stokes coefficients at t0, r0={:.4} km", r0).unwrap();
+        writeln!(f, "# l  m  C_lm  S_lm").unwrap();
+        for l in 0..=max_degree {
+            for mm in 0..=l {
+                writeln!(f, "{} {} {:.15e} {:.15e}",
+                    l, mm, cs.c[l][mm], cs.s[l][mm]).unwrap();
+            }
+        }
+    }
+    println!("  Output written to {}/", dir);
+    cs.print();
+}
+
 // ── Python module (only compiled with --features extension-module) ────────────
 
 /// Run a GUBAS simulation from Python.
@@ -418,6 +595,23 @@ fn run_stm_py(work_dir: Option<&str>) -> PyResult<()> {
             .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))?;
     }
     run_stm();
+    Ok(())
+}
+
+#[cfg(feature = "extension-module")]
+#[pyfunction]
+#[pyo3(signature = (min_degree=2, max_degree=2, which_body=0, work_dir=None))]
+fn run_stm_augmented_py(
+    min_degree: usize,
+    max_degree: usize,
+    which_body: usize,
+    work_dir:   Option<&str>,
+) -> PyResult<()> {
+    if let Some(dir) = work_dir {
+        std::env::set_current_dir(dir)
+            .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))?;
+    }
+    run_stm_augmented(min_degree, max_degree, which_body);
     Ok(())
 }
 
@@ -559,11 +753,184 @@ impl DynamicsModel {
     }
 }
 
+// ── AugmentedDynamicsModel ───────────────────────────────────────────────────
+//
+// Callable OD interface for the augmented system z = [x(30); θ(N)].
+// Analogous to DynamicsModel but for gravity-parameter estimation.
+//
+// Python usage:
+//   model = gubas_rs.AugmentedDynamicsModel(min_degree=2, max_degree=2)
+//   zdot, A_aug = model.eval(z, t)           # point evaluation
+//   rhs  = model.eval_stm(z_phi_flat, t)     # full ODE RHS for scipy
+
+#[cfg(feature = "extension-module")]
+#[pyclass]
+pub struct AugmentedDynamicsModel {
+    params_dual_base: Params<dual::Dual>,
+    theta_indices:    Vec<(usize, usize, usize)>,
+    which_body:       usize,
+    pub n_aug:        usize,
+}
+
+#[cfg(feature = "extension-module")]
+#[pymethods]
+impl AugmentedDynamicsModel {
+    /// Build model from `ic_input.txt` in the current (or given) directory.
+    ///
+    /// `min_degree`, `max_degree` select which T_{ijk} degrees form θ.
+    /// `which_body` : 0 = primary T_a,  1 = secondary T_b.
+    #[new]
+    #[pyo3(signature = (min_degree=2, max_degree=2, which_body=0, work_dir=None))]
+    fn new(
+        min_degree: usize, max_degree: usize,
+        which_body: usize, work_dir: Option<&str>,
+    ) -> PyResult<Self> {
+        if let Some(dir) = work_dir {
+            std::env::set_current_dir(dir)
+                .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))?;
+        }
+        let ics = ic_read();
+        let mut order = ics.order.max(ics.order_a).max(ics.order_b);
+        if ics.a_shape == 2 { order = order.max(ics.order_a); }
+        if ics.b_shape == 2 { order = order.max(ics.order_b); }
+
+        let ta = Cube::load_csv(&format!("TDP_{}.csv", order))
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+        let tb = Cube::load_csv(&format!("TDS_{}.csv", order))
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+        let ia = load_moi_csv("IDP.csv")
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+        let ib = load_moi_csv("IDS.csv")
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+
+        let tk = tk_calc(order); let a = a_calc(order); let b = b_calc(order);
+        let mc = ta.get(0,0,0); let ms = tb.get(0,0,0);
+        let m  = mc * ms / (mc + ms); let nu = ms / (mc + ms);
+        let mean_motion = (ics.g*(ics.msun+mc+ms)/(ics.sol_rad*ics.au_def/1000.0).powi(3)).sqrt();
+        let n_hyp   = (ics.g*ics.mplanet/ics.a_hyp.abs().powi(3)).sqrt();
+        let n_helio = (ics.g*ics.msolar /ics.a_helio.abs().powi(3)).sqrt();
+        let mut params = Params {
+            g: ics.g, m, nu, ta, tb, ia, ib, n: order, tk, a, b,
+            flyby_toggle:ics.flyby_toggle, helio_toggle:ics.helio_toggle,
+            sg_toggle:ics.sg_toggle, tt_toggle:ics.tt_toggle,
+            mplanet:ics.mplanet, a_hyp:ics.a_hyp, e_hyp:ics.e_hyp, i_hyp:ics.i_hyp,
+            raan_hyp:ics.raan_hyp, om_hyp:ics.om_hyp, tau_hyp:ics.tau_hyp, n_hyp,
+            msolar:ics.msolar, a_helio:ics.a_helio, e_helio:ics.e_helio, i_helio:ics.i_helio,
+            raan_helio:ics.raan_helio, om_helio:ics.om_helio, tau_helio:ics.tau_helio, n_helio,
+            sol_rad:ics.sol_rad, au_def:ics.au_def, mean_motion,
+            love1:ics.love1, love2:ics.love2, refrad1:ics.refrad1, refrad2:ics.refrad2,
+            rho_a:ics.rho_a, rho_b:ics.rho_b, eps1:ics.eps1, eps2:ics.eps2,
+            ida:math3::ZERO_M, idb:math3::ZERO_M, msun:ics.msun,
+        };
+        params.compute_lgvi_inertia();
+
+        let theta_indices = stokes::inertia_indices(min_degree, max_degree);
+        let n_aug = 30 + theta_indices.len();
+        let params_dual_base = types::promote_params::<dual::Dual>(&params);
+
+        Ok(Self { params_dual_base, theta_indices, which_body, n_aug })
+    }
+
+    /// Augmented state dimension: 30 + N_theta.
+    #[getter]
+    fn n_aug(&self) -> usize { self.n_aug }
+
+    /// θ indices as list of (i,j,k) tuples.
+    #[getter]
+    fn theta_indices(&self) -> Vec<(usize,usize,usize)> { self.theta_indices.clone() }
+
+    /// Nominal T_{ijk} values for the selected body and indices.
+    /// Use this as θ₀ when setting up the augmented initial state z₀ = [x₀; θ₀].
+    #[getter]
+    fn theta_nominal(&self) -> Vec<f64> {
+        self.theta_indices.iter().map(|&(i, j, k)| {
+            let d = if self.which_body == 0 {
+                self.params_dual_base.ta.get(i, j, k)
+            } else {
+                self.params_dual_base.tb.get(i, j, k)
+            };
+            d.re
+        }).collect()
+    }
+
+    /// eval(z, t) → (zdot, A_aug_flat)
+    ///
+    /// z: list of length n_aug = 30+N_theta   (x followed by θ values)
+    /// Returns:
+    ///   zdot      : list length n_aug         (θ̇ = 0 for last N entries)
+    ///   A_aug_flat: list length n_aug²        (row-major)
+    fn eval(&self, z: Vec<f64>, t: f64) -> PyResult<(Vec<f64>, Vec<f64>)> {
+        let n_aug = self.n_aug;
+        if z.len() != n_aug {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                format!("z must have {} elements, got {}", n_aug, z.len())));
+        }
+        let x: [f64; 30] = z[..30].try_into().unwrap();
+        let theta = z[30..].to_vec();
+        let aug_ode_dual = self.make_aug_dual_ode();
+        let (zdot, a_aug) = stm::eval_aug_dynamics_and_jacobian(&x, &theta, t, &aug_ode_dual);
+        Ok((zdot, a_aug))
+    }
+
+    /// eval_stm(z_phi_flat, t) → full augmented ODE RHS for scipy.
+    ///
+    /// z_phi_flat: list of length n_aug + n_aug²
+    ///   first n_aug elements : z = [x; θ]
+    ///   last  n_aug² elements: Φ_aug flattened row-major
+    ///
+    /// Returns same layout. Initialize with z=[x₀;θ₀] and Φ_aug = I_{n_aug}.
+    ///
+    /// Example (scipy DOP853)::
+    ///
+    ///   n = model.n_aug
+    ///   phi0 = np.eye(n).ravel()
+    ///   y0   = np.concatenate([x0, theta0, phi0])
+    ///   sol  = solve_ivp(lambda t,y: model.eval_stm(y.tolist(), t),
+    ///                    [t0,tf], y0, method="DOP853", rtol=1e-10,
+    ///                    dense_output=True)
+    fn eval_stm(&self, z_phi_flat: Vec<f64>, t: f64) -> PyResult<Vec<f64>> {
+        let expected = self.n_aug + self.n_aug * self.n_aug;
+        if z_phi_flat.len() != expected {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                format!("z_phi_flat must have {} elements, got {}",
+                        expected, z_phi_flat.len())));
+        }
+        let aug_ode_dual = self.make_aug_dual_ode();
+        Ok(stm::augmented_state_ode_rhs(&z_phi_flat, t, &aug_ode_dual))
+    }
+}
+
+#[cfg(feature = "extension-module")]
+impl AugmentedDynamicsModel {
+    fn make_aug_dual_ode(&self)
+        -> impl Fn(&[dual::Dual], f64) -> Vec<dual::Dual> + '_
+    {
+        let pdb  = self.params_dual_base.clone();
+        let tidx = self.theta_indices.clone();
+        let wb   = self.which_body;
+        move |z: &[dual::Dual], t: f64| -> Vec<dual::Dual> {
+            let mut pd = pdb.clone();
+            for (k, &(ii,jj,kk)) in tidx.iter().enumerate() {
+                if wb == 0 { pd.ta.set(ii, jj, kk, z[30+k]); }
+                else       { pd.tb.set(ii, jj, kk, z[30+k]); }
+            }
+            let mut x = [dual::Dual::from_re(0.0); 30];
+            for i in 0..30 { x[i] = z[i]; }
+            let xdot = dynamics::hou_ode(x, t, &pd);
+            let mut zdot = vec![dual::Dual::from_re(0.0); 30 + tidx.len()];
+            for i in 0..30 { zdot[i] = xdot[i]; }
+            zdot
+        }
+    }
+}
+
 #[cfg(feature = "extension-module")]
 #[pymodule]
 fn gubas_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run, m)?)?;
     m.add_function(wrap_pyfunction!(run_stm_py, m)?)?;
+    m.add_function(wrap_pyfunction!(run_stm_augmented_py, m)?)?;
     m.add_class::<DynamicsModel>()?;
+    m.add_class::<AugmentedDynamicsModel>()?;
     Ok(())
 }
