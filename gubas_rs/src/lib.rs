@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 pub mod coefficients;
+pub mod dual;
 pub mod dynamics;
 pub mod inertia;
 pub mod integrators;
@@ -8,6 +9,7 @@ pub mod lgvi;
 pub mod math3;
 pub mod orbit;
 pub mod potential;
+pub mod stm;
 pub mod types;
 
 use coefficients::{a_calc, b_calc, tk_calc};
@@ -244,6 +246,145 @@ pub fn run_simulation() {
     }
 }
 
+// ── run_stm ───────────────────────────────────────────────────────────────────
+
+/// Propagate the STM alongside the trajectory using forward-mode AD Jacobians.
+///
+/// Reads `ic_input.txt`, builds `Params<f64>` identically to `run_simulation`,
+/// then:
+///   1. Prints max |AD − FD| for the Jacobian at t₀ (sanity check).
+///   2. Runs `propagate_stm_ad` (RK4 + exact dual-number Jacobian).
+///   3. Writes binary output to `output_phi/`:
+///      - `phi_out.bin`   — STM history Φ(t),  shape (nsteps, 30, 30) f64 LE
+///      - `phi_t_out.bin` — times,              shape (nsteps,)        f64 LE
+///      - `jac_ad.bin`    — Jacobian A at t₀ from AD, shape (30, 30)   f64 LE
+///      - `jac_fd.bin`    — Jacobian A at t₀ from FD, shape (30, 30)   f64 LE
+pub fn run_stm() {
+    use dual::Dual;
+    use dynamics::hou_ode;
+    use stm::{
+        eval_dynamics_and_jacobian, jacobian_ad, jacobian_fd,
+        propagate_stm_rk87_ad, write_A_bin, write_phi_bin, write_phi_t_bin,
+        write_x_bin, write_xdot_bin,
+    };
+    use types::promote_params;
+
+    let ics = ic_read();
+
+    let mut order   = ics.order;
+    let mut order_a = ics.order_a;
+    let mut order_b = ics.order_b;
+    if ics.a_shape == 2 { order_a = order_a.max(order); }
+    if ics.b_shape == 2 { order_b = order_b.max(order); }
+    order = order.max(order_a).max(order_b);
+
+    let ta = Cube::load_csv(&format!("TDP_{}.csv", order))
+        .expect("TDP csv not found — run with Tgen=1 first");
+    let tb = Cube::load_csv(&format!("TDS_{}.csv", order))
+        .expect("TDS csv not found — run with Tgen=1 first");
+    let ia = load_moi_csv("IDP.csv").expect("IDP csv not found");
+    let ib = load_moi_csv("IDS.csv").expect("IDS csv not found");
+
+    let tk = tk_calc(order);
+    let a  = a_calc(order);
+    let b  = b_calc(order);
+
+    let mc  = ta.get(0, 0, 0);
+    let ms  = tb.get(0, 0, 0);
+    let m   = mc * ms / (mc + ms);
+    let nu  = ms / (mc + ms);
+    let mean_motion = (ics.g * (ics.msun + mc + ms)
+                       / (ics.sol_rad * ics.au_def / 1000.0).powi(3)).sqrt();
+    let n_hyp   = (ics.g * ics.mplanet / ics.a_hyp.abs().powi(3)).sqrt();
+    let n_helio = (ics.g * ics.msolar  / ics.a_helio.abs().powi(3)).sqrt();
+
+    let mut params = Params {
+        g: ics.g, m, nu, ta, tb, ia, ib,
+        n: order, tk, a, b,
+        flyby_toggle: ics.flyby_toggle,
+        helio_toggle: ics.helio_toggle,
+        sg_toggle:    ics.sg_toggle,
+        tt_toggle:    ics.tt_toggle,
+        mplanet:   ics.mplanet,
+        a_hyp:     ics.a_hyp, e_hyp: ics.e_hyp, i_hyp: ics.i_hyp,
+        raan_hyp:  ics.raan_hyp, om_hyp: ics.om_hyp, tau_hyp: ics.tau_hyp, n_hyp,
+        msolar:    ics.msolar,
+        a_helio:   ics.a_helio, e_helio: ics.e_helio, i_helio: ics.i_helio,
+        raan_helio: ics.raan_helio, om_helio: ics.om_helio, tau_helio: ics.tau_helio, n_helio,
+        sol_rad:     ics.sol_rad, au_def: ics.au_def, mean_motion,
+        love1:     ics.love1, love2: ics.love2,
+        refrad1:   ics.refrad1, refrad2: ics.refrad2,
+        rho_a:     ics.rho_a, rho_b: ics.rho_b,
+        eps1:      ics.eps1, eps2: ics.eps2,
+        ida: math3::ZERO_M, idb: math3::ZERO_M,
+        msun: ics.msun,
+    };
+    params.compute_lgvi_inertia();
+
+    // promote once — all eps = 0 (params are constants, not differentiated)
+    let params_dual = promote_params::<Dual>(&params);
+
+    let ode      = |x: [f64;  30], t: f64| hou_ode(x, t, &params);
+    let ode_dual = |x: [Dual; 30], t: f64| hou_ode(x, t, &params_dual);
+
+    // ── Jacobian sanity check at t₀ ───────────────────────────────────────────
+    println!("Computing Jacobian at t₀ via AD and FD ...");
+    let f0     = hou_ode(ics.x0, ics.t0, &params);
+    let jac_fd = jacobian_fd(&ics.x0, ics.t0, &f0, &ode);
+    let jac_ad = jacobian_ad(&ics.x0, ics.t0, &ode_dual);
+
+    let max_err = (0..30).flat_map(|i| (0..30).map(move |j|
+        (jac_ad[i][j] - jac_fd[i][j]).abs()
+    )).fold(0.0_f64, f64::max);
+    println!("  Max |AD − FD| = {:.3e}  (FD truncation, expect ~1e-7..1e-8)", max_err);
+
+    std::fs::create_dir_all("output_phi").unwrap();
+    write_phi_bin("output_phi", &[jac_ad]).expect("write jac_ad");
+    // re-use write_phi_bin for jac_fd by writing to a different file
+    {
+        use std::io::Write;
+        let mut f = std::io::BufWriter::new(
+            std::fs::File::create("output_phi/jac_fd.bin").unwrap());
+        for row in jac_fd.iter() {
+            for &v in row.iter() { f.write_all(&v.to_le_bytes()).unwrap(); }
+        }
+    }
+    // rename phi_out.bin → jac_ad.bin
+    std::fs::rename("output_phi/phi_out.bin", "output_phi/jac_ad.bin").unwrap();
+
+    // ── STM propagation — RK7(8) adaptive ────────────────────────────────────
+    println!("Propagating STM: RK7(8) Dormand-Prince adaptive, tol={:.0e} ...",
+             ics.tol);
+    println!("  [13 stages per step, each with 1 f64 + 30 dual ODE evals]");
+
+    let (ts, xs, phis) = propagate_stm_rk87_ad(
+        ics.x0, ics.t0, ics.tf, ics.tol, ode, ode_dual, 1,
+    );
+
+    write_phi_bin("output_phi", &phis).expect("write phi");
+    write_phi_t_bin("output_phi", &ts).expect("write phi_t");
+    write_x_bin("output_phi", &xs).expect("write x");
+    println!("  Written {} STM snapshots to output_phi/", phis.len());
+
+    // ── Mode 2: evaluate (ẋ, A) at each recorded epoch ───────────────────────
+    // Closures were moved into propagate_stm_rk87_ad; rebuild from still-live refs.
+    println!("Evaluating dynamics and exact Jacobian at {} epochs ...", xs.len());
+    let ode2      = |x: [f64;  30], t: f64| dynamics::hou_ode(x, t, &params);
+    let ode_dual2 = |x: [Dual; 30], t: f64| dynamics::hou_ode(x, t, &params_dual);
+
+    let mut xdots:  Vec<[f64; 30]> = Vec::with_capacity(xs.len());
+    let mut jacobs: Vec<stm::Phi>  = Vec::with_capacity(xs.len());
+    for (&xi, &ti) in xs.iter().zip(ts.iter()) {
+        let (xdot, a) = eval_dynamics_and_jacobian(xi, ti, &ode2, &ode_dual2);
+        xdots.push(xdot);
+        jacobs.push(a);
+    }
+
+    write_xdot_bin("output_phi", &xdots).expect("write xdot");
+    write_A_bin("output_phi", &jacobs).expect("write A");
+    println!("  Written xdot_out.bin and A_out.bin to output_phi/");
+}
+
 // ── Python module (only compiled with --features extension-module) ────────────
 
 /// Run a GUBAS simulation from Python.
@@ -269,8 +410,160 @@ fn run(work_dir: Option<&str>) -> PyResult<()> {
 }
 
 #[cfg(feature = "extension-module")]
+#[pyfunction]
+#[pyo3(signature = (work_dir=None))]
+fn run_stm_py(work_dir: Option<&str>) -> PyResult<()> {
+    if let Some(dir) = work_dir {
+        std::env::set_current_dir(dir)
+            .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))?;
+    }
+    run_stm();
+    Ok(())
+}
+
+// ── DynamicsModel — callable OD interface ─────────────────────────────────────
+
+/// Loaded gravity model for the Didymos binary system.
+///
+/// Initialises once from `ic_input.txt` in the working directory, then exposes
+/// two lightweight call methods:
+///
+/// ```python
+/// import gubas_rs, numpy as np
+///
+/// model = gubas_rs.DynamicsModel()         # reads ic_input.txt, builds params
+///
+/// xdot, A_flat = model.eval(x, t)          # ẋ (len 30) + A (len 900, row-major)
+/// A = np.array(A_flat).reshape(30, 30)
+///
+/// dxphi = model.eval_augmented(xphi, t)   # 930-element augmented ODE RHS
+/// ```
+#[cfg(feature = "extension-module")]
+#[pyclass]
+pub struct DynamicsModel {
+    params:      Params<f64>,
+    params_dual: Params<dual::Dual>,
+}
+
+#[cfg(feature = "extension-module")]
+#[pymethods]
+impl DynamicsModel {
+    /// Create a DynamicsModel from `ic_input.txt` in the current (or given) directory.
+    #[new]
+    #[pyo3(signature = (work_dir=None))]
+    fn new(work_dir: Option<&str>) -> PyResult<Self> {
+        if let Some(dir) = work_dir {
+            std::env::set_current_dir(dir)
+                .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))?;
+        }
+        let ics = ic_read();
+
+        let mut order   = ics.order;
+        let mut order_a = ics.order_a;
+        let mut order_b = ics.order_b;
+        if ics.a_shape == 2 { order_a = order_a.max(order); }
+        if ics.b_shape == 2 { order_b = order_b.max(order); }
+        order = order.max(order_a).max(order_b);
+
+        let ta = Cube::load_csv(&format!("TDP_{}.csv", order))
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+        let tb = Cube::load_csv(&format!("TDS_{}.csv", order))
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+        let ia = load_moi_csv("IDP.csv")
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+        let ib = load_moi_csv("IDS.csv")
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+
+        let tk = tk_calc(order);
+        let a  = a_calc(order);
+        let b  = b_calc(order);
+
+        let mc  = ta.get(0, 0, 0);
+        let ms  = tb.get(0, 0, 0);
+        let m   = mc * ms / (mc + ms);
+        let nu  = ms / (mc + ms);
+        let mean_motion = (ics.g * (ics.msun + mc + ms)
+                           / (ics.sol_rad * ics.au_def / 1000.0).powi(3)).sqrt();
+        let n_hyp   = (ics.g * ics.mplanet / ics.a_hyp.abs().powi(3)).sqrt();
+        let n_helio = (ics.g * ics.msolar  / ics.a_helio.abs().powi(3)).sqrt();
+
+        let mut params = Params {
+            g: ics.g, m, nu, ta, tb, ia, ib,
+            n: order, tk, a, b,
+            flyby_toggle: ics.flyby_toggle,
+            helio_toggle: ics.helio_toggle,
+            sg_toggle:    ics.sg_toggle,
+            tt_toggle:    ics.tt_toggle,
+            mplanet:      ics.mplanet,
+            a_hyp: ics.a_hyp, e_hyp: ics.e_hyp, i_hyp: ics.i_hyp,
+            raan_hyp: ics.raan_hyp, om_hyp: ics.om_hyp, tau_hyp: ics.tau_hyp, n_hyp,
+            msolar:    ics.msolar,
+            a_helio: ics.a_helio, e_helio: ics.e_helio, i_helio: ics.i_helio,
+            raan_helio: ics.raan_helio, om_helio: ics.om_helio, tau_helio: ics.tau_helio, n_helio,
+            sol_rad: ics.sol_rad, au_def: ics.au_def, mean_motion,
+            love1: ics.love1, love2: ics.love2,
+            refrad1: ics.refrad1, refrad2: ics.refrad2,
+            rho_a: ics.rho_a, rho_b: ics.rho_b,
+            eps1: ics.eps1, eps2: ics.eps2,
+            ida: math3::ZERO_M, idb: math3::ZERO_M,
+            msun: ics.msun,
+        };
+        params.compute_lgvi_inertia();
+        let params_dual = types::promote_params::<dual::Dual>(&params);
+
+        Ok(DynamicsModel { params, params_dual })
+    }
+
+    /// Evaluate ẋ = f(x, t) and A = ∂f/∂x at a single point via exact AD.
+    ///
+    /// Args:
+    ///   x (list[float]): 30-element state vector.
+    ///   t (float): time (s).
+    ///
+    /// Returns:
+    ///   (xdot, A_flat): xdot is len-30, A_flat is len-900 row-major.
+    fn eval(&self, x: Vec<f64>, t: f64) -> PyResult<(Vec<f64>, Vec<f64>)> {
+        if x.len() != 30 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                format!("x must have 30 elements, got {}", x.len())));
+        }
+        let xa: [f64; 30] = x.try_into().unwrap();
+        let ode      = |xi: [f64;         30], ti: f64| dynamics::hou_ode(xi, ti, &self.params);
+        let ode_dual = |xi: [dual::Dual;  30], ti: f64| dynamics::hou_ode(xi, ti, &self.params_dual);
+        let (xdot, a) = stm::eval_dynamics_and_jacobian(xa, t, &ode, &ode_dual);
+        let a_flat: Vec<f64> = a.iter().flat_map(|row| row.iter().copied()).collect();
+        Ok((xdot.to_vec(), a_flat))
+    }
+
+    /// Augmented ODE RHS for external integrators (scipy, MATLAB, etc.).
+    ///
+    /// State layout (930 elements): xphi[0:30]=x, xphi[30:930]=Φ row-major.
+    /// Returns the same layout: [ẋ; vec(Φ̇ = A·Φ)].
+    ///
+    /// Example (scipy DOP853)::
+    ///
+    ///     phi0   = np.eye(30).ravel()
+    ///     x0_aug = np.concatenate([x0, phi0])
+    ///     sol    = solve_ivp(lambda t, xp: model.eval_augmented(xp.tolist(), t),
+    ///                        [t0, tf], x0_aug, method="DOP853", rtol=1e-12)
+    fn eval_augmented(&self, xphi: Vec<f64>, t: f64) -> PyResult<Vec<f64>> {
+        if xphi.len() != 930 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                format!("xphi must have 930 elements, got {}", xphi.len())));
+        }
+        let xa: [f64; 930] = xphi.try_into().unwrap();
+        let ode      = |xi: [f64;         30], ti: f64| dynamics::hou_ode(xi, ti, &self.params);
+        let ode_dual = |xi: [dual::Dual;  30], ti: f64| dynamics::hou_ode(xi, ti, &self.params_dual);
+        let out = stm::augmented_ode_rhs(xa, t, &ode, &ode_dual);
+        Ok(out.to_vec())
+    }
+}
+
+#[cfg(feature = "extension-module")]
 #[pymodule]
 fn gubas_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run, m)?)?;
+    m.add_function(wrap_pyfunction!(run_stm_py, m)?)?;
+    m.add_class::<DynamicsModel>()?;
     Ok(())
 }

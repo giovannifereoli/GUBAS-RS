@@ -1,10 +1,10 @@
 implementation=CPython
-version=3.12
+version=3.14
 shared=true
 abi3=false
-lib_name=python3.12
-lib_dir=/Library/Frameworks/Python.framework/Versions/3.12/lib
-executable=/Library/Frameworks/Python.framework/Versions/3.12/bin/python3
+lib_name=python3.14
+lib_dir=/opt/homebrew/opt/python@3.14/Frameworks/Python.framework/Versions/3.14/lib
+executable=/Users/gife3672/Library/CloudStorage/OneDrive-UCB-O365/Desktop/Academia_Offline/gubas_RUST/.venv/bin/python
 pointer_width=64
 build_flags=
 suppress_build_script_link_lines=false

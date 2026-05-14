@@ -1,7 +1,6 @@
 ## TODO
 
-- [ ] Fix energy conservation / long-term drift.
-- [ ] Implement variational equation partials for orbit determination.
-- [ ] Split contributions/modules for integration into SCB.
+- [ ] Implement variational equation partials for orbit determination. Maybe auto-diff or similar?
+- [ ] Is there anyeway to split conntribution of each body for OD implementation
 - [ ] Better understand pros/cons of splitting the implementation.
 - [ ] Improve integration with Stokes coefficients.

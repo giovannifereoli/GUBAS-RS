@@ -8,8 +8,9 @@
 
 use crate::coefficients::t_ind;
 use crate::inertia::dt_dc;
-use crate::math3::{Mat3, Vec3};
+use crate::math3::{Mat3, Scalar, Vec3};
 use crate::types::Cube;
+use num_traits::NumCast;
 
 // ── u_tilde ───────────────────────────────────────────────────────────────────
 
@@ -18,11 +19,12 @@ use crate::types::Cube;
 /// `dim` = mutual potential truncation order (used to size a/b).
 /// `e`   = unit position vector (row vec in original code, here just a Vec3).
 /// Mirrors `double u_tilde(int dim, int n, ...)`.
-pub fn u_tilde(dim: usize, n: usize, tk: &[Vec<f64>],
-               a: &[f64], b: &[f64], e: Vec3,
-               ta: &Cube, tbp: &Cube) -> f64 {
+pub fn u_tilde<T: Scalar>(dim: usize, n: usize, tk: &[Vec<f64>],
+                          a: &[f64], b: &[f64], e: Vec3<T>,
+                          ta: &Cube<T>, tbp: &Cube<T>) -> T {
+    let to_t = |x: f64| -> T { <T as NumCast>::from(x).unwrap() };
     let ncols = tk[n].len();
-    let mut u = vec![0.0_f64; ncols];
+    let mut u = vec![T::zero(); ncols];
 
     let mut k = n as i64;
     while k >= 0 {
@@ -47,7 +49,7 @@ pub fn u_tilde(dim: usize, n: usize, tk: &[Vec<f64>],
                                        * e[2].powi((i3 + i6) as i32);
                             let ta_v = ta.get(i1 + j1, i2 + j2, i3 + j3);
                             let tb_v = tbp.get(i4 + j4, i5 + j5, i6 + j6);
-                            u[ku / 2] += a_val * b_val * e_term * ta_v * tb_v;
+                            u[ku / 2] += to_t(a_val * b_val) * e_term * ta_v * tb_v;
                           }
                         }
                       }
@@ -58,10 +60,10 @@ pub fn u_tilde(dim: usize, n: usize, tk: &[Vec<f64>],
             }
           }
         }
-        u[ku / 2] *= tk[n][ku / 2];
+        u[ku / 2] = u[ku / 2] * to_t(tk[n][ku / 2]);
         k -= 2;
     }
-    u.iter().sum()
+    u.iter().copied().fold(T::zero(), |acc, x| acc + x)
 }
 
 // ── de_dx ─────────────────────────────────────────────────────────────────────
@@ -70,14 +72,14 @@ pub fn u_tilde(dim: usize, n: usize, tk: &[Vec<f64>],
 ///
 /// `e` = unit vector, `r_mag` = magnitude |r|.
 /// Mirrors `double de_dx(mat e, double R, int de, int dx)`.
-pub fn de_dx(e: Vec3, r_mag: f64, de: usize, dx: usize) -> f64 {
+pub fn de_dx<T: Scalar>(e: Vec3<T>, r_mag: T, de: usize, dx: usize) -> T {
     let x = [e[0] * r_mag, e[1] * r_mag, e[2] * r_mag];
     if de == dx {
-        let mut sum_sq = 0.0_f64;
+        let mut sum_sq = T::zero();
         for i in 0..3 { if i != dx { sum_sq += x[i] * x[i]; } }
         sum_sq / r_mag.powi(3)
     } else {
-        -x[de] * x[dx] / r_mag.powi(3)
+        -(x[de] * x[dx]) / r_mag.powi(3)
     }
 }
 
@@ -86,15 +88,16 @@ pub fn de_dx(e: Vec3, r_mag: f64, de: usize, dx: usize) -> f64 {
 /// Partial of ũ_n w.r.t. position component `x[dx]`.
 ///
 /// Mirrors `double du_dx_tilde(int dim, int n, ..., int dx, ...)`.
-pub fn du_dx_tilde(dim: usize, n: usize, tk: &[Vec<f64>],
-                   a: &[f64], b: &[f64], e: Vec3, r_mag: f64, dx: usize,
-                   ta: &Cube, tbp: &Cube) -> f64 {
+pub fn du_dx_tilde<T: Scalar>(dim: usize, n: usize, tk: &[Vec<f64>],
+                              a: &[f64], b: &[f64], e: Vec3<T>, r_mag: T, dx: usize,
+                              ta: &Cube<T>, tbp: &Cube<T>) -> T {
+    let to_t = |x: f64| -> T { <T as NumCast>::from(x).unwrap() };
     let de0 = de_dx(e, r_mag, 0, dx);
     let de1 = de_dx(e, r_mag, 1, dx);
     let de2 = de_dx(e, r_mag, 2, dx);
 
     let ncols = tk[n].len();
-    let mut du = vec![0.0_f64; ncols];
+    let mut du = vec![T::zero(); ncols];
 
     let mut k = n as i64;
     while k >= 0 {
@@ -115,13 +118,12 @@ pub fn du_dx_tilde(dim: usize, n: usize, tk: &[Vec<f64>],
                             let p = i1 + i4;
                             let q = i2 + i5;
                             let r = i3 + i6;
-                            // chain rule: d/dx[p](e0^p * e1^q * e2^r)
                             let ce = e_partial(e, p, q, r, de0, de1, de2);
                             let a_v = a[t_ind(ku, i1, i2, i3, i4, i5, i6, dim + 1)];
                             let b_v = b[t_ind(nk, j1, j2, j3, j4, j5, j6, dim + 1)];
                             let ta_v = ta.get(i1 + j1, i2 + j2, i3 + j3);
                             let tb_v = tbp.get(i4 + j4, i5 + j5, i6 + j6);
-                            du[ku / 2] += a_v * b_v * ce * ta_v * tb_v;
+                            du[ku / 2] += to_t(a_v * b_v) * ce * ta_v * tb_v;
                           }
                         }
                       }
@@ -132,29 +134,27 @@ pub fn du_dx_tilde(dim: usize, n: usize, tk: &[Vec<f64>],
             }
           }
         }
-        du[ku / 2] *= tk[n][ku / 2];
+        du[ku / 2] = du[ku / 2] * to_t(tk[n][ku / 2]);
         k -= 2;
     }
-    du.iter().sum()
+    du.iter().copied().fold(T::zero(), |acc, x| acc + x)
 }
 
 /// d/dx of  e0^p * e1^q * e2^r  using chain rule and de0,de1,de2.
-fn e_partial(e: Vec3, p: usize, q: usize, r: usize,
-             de0: f64, de1: f64, de2: f64) -> f64 {
-    // Handles the 8 cases by checking which exponents are zero.
-    // If an exponent is 0 the corresponding base term disappears in the
-    // partial — exactly as in the C++ conditional tree.
-    let mut ce = 0.0_f64;
+fn e_partial<T: Scalar>(e: Vec3<T>, p: usize, q: usize, r: usize,
+                        de0: T, de1: T, de2: T) -> T {
+    let to_t = |x: f64| -> T { <T as NumCast>::from(x).unwrap() };
+    let mut ce = T::zero();
     if p > 0 {
-        ce += (p as f64) * e[0].powi(p as i32 - 1) * e[1].powi(q as i32)
+        ce += to_t(p as f64) * e[0].powi(p as i32 - 1) * e[1].powi(q as i32)
               * e[2].powi(r as i32) * de0;
     }
     if q > 0 {
-        ce += (q as f64) * e[0].powi(p as i32) * e[1].powi(q as i32 - 1)
+        ce += to_t(q as f64) * e[0].powi(p as i32) * e[1].powi(q as i32 - 1)
               * e[2].powi(r as i32) * de1;
     }
     if r > 0 {
-        ce += (r as f64) * e[0].powi(p as i32) * e[1].powi(q as i32)
+        ce += to_t(r as f64) * e[0].powi(p as i32) * e[1].powi(q as i32)
               * e[2].powi(r as i32 - 1) * de2;
     }
     ce
@@ -166,11 +166,12 @@ fn e_partial(e: Vec3, p: usize, q: usize, r: usize,
 /// pre-computed dT cube.
 ///
 /// Mirrors `double du_dc_tilde(int dim, int n, ..., cube* dT)`.
-pub fn du_dc_tilde(dim: usize, n: usize, tk: &[Vec<f64>],
-                   a: &[f64], b: &[f64], e: Vec3,
-                   ta: &Cube, dt: &Cube) -> f64 {
+pub fn du_dc_tilde<T: Scalar>(dim: usize, n: usize, tk: &[Vec<f64>],
+                              a: &[f64], b: &[f64], e: Vec3<T>,
+                              ta: &Cube<T>, dt: &Cube<T>) -> T {
+    let to_t = |x: f64| -> T { <T as NumCast>::from(x).unwrap() };
     let ncols = tk[n].len();
-    let mut du = vec![0.0_f64; ncols];
+    let mut du = vec![T::zero(); ncols];
 
     let mut k = n as i64;
     while k >= 0 {
@@ -195,7 +196,7 @@ pub fn du_dc_tilde(dim: usize, n: usize, tk: &[Vec<f64>],
                                        * e[2].powi((i3 + i6) as i32);
                             let ta_v = ta.get(i1 + j1, i2 + j2, i3 + j3);
                             let dt_v = dt.get(i4 + j4, i5 + j5, i6 + j6);
-                            du[ku / 2] += a_v * b_v * e_term * ta_v * dt_v;
+                            du[ku / 2] += to_t(a_v * b_v) * e_term * ta_v * dt_v;
                           }
                         }
                       }
@@ -206,10 +207,10 @@ pub fn du_dc_tilde(dim: usize, n: usize, tk: &[Vec<f64>],
             }
           }
         }
-        du[ku / 2] *= tk[n][ku / 2];
+        du[ku / 2] = du[ku / 2] * to_t(tk[n][ku / 2]);
         k -= 2;
     }
-    du.iter().sum()
+    du.iter().copied().fold(T::zero(), |acc, x| acc + x)
 }
 
 // ── du_x ─────────────────────────────────────────────────────────────────────
@@ -219,16 +220,17 @@ pub fn du_dc_tilde(dim: usize, n: usize, tk: &[Vec<f64>],
 /// Returns the *energy* partial (negative of the Hou paper value, i.e. the
 /// correct sign for `vd = ... - (1/m)*du_dr`).
 /// Mirrors `double du_x(...)`.
-pub fn du_x(g: f64, m: usize, tk: &[Vec<f64>],
-            a: &[f64], b: &[f64], e: Vec3, r_mag: f64, dx: usize,
-            ta: &Cube, tbp: &Cube) -> f64 {
+pub fn du_x<T: Scalar>(g: T, m: usize, tk: &[Vec<f64>],
+                       a: &[f64], b: &[f64], e: Vec3<T>, r_mag: T, dx: usize,
+                       ta: &Cube<T>, tbp: &Cube<T>) -> T {
+    let to_t = |x: f64| -> T { <T as NumCast>::from(x).unwrap() };
     let x = [e[0] * r_mag, e[1] * r_mag, e[2] * r_mag];
-    let mut du = 0.0_f64;
+    let mut du = T::zero();
     for n in 0..=m {
-        let nf = n as f64;
-        du += (-(nf + 1.0) * x[dx] / r_mag.powf(nf + 3.0))
+        let nf = to_t(n as f64);
+        du += (-(nf + T::one()) * x[dx] / r_mag.powf(nf + to_t(3.0)))
               * u_tilde(m, n, tk, a, b, e, ta, tbp)
-            + (1.0 / r_mag.powf(nf + 1.0))
+            + (T::one() / r_mag.powf(nf + T::one()))
               * du_dx_tilde(m, n, tk, a, b, e, r_mag, dx, ta, tbp);
     }
     -du * g
@@ -240,12 +242,14 @@ pub fn du_x(g: f64, m: usize, tk: &[Vec<f64>],
 /// C(i,j), given pre-computed dT.
 ///
 /// Mirrors `double du_c(...)`.
-pub fn du_c(g: f64, m: usize, tk: &[Vec<f64>],
-            a: &[f64], b: &[f64], e: Vec3, r_mag: f64,
-            ta: &Cube, dt: &Cube) -> f64 {
-    let mut du = 0.0_f64;
+pub fn du_c<T: Scalar>(g: T, m: usize, tk: &[Vec<f64>],
+                       a: &[f64], b: &[f64], e: Vec3<T>, r_mag: T,
+                       ta: &Cube<T>, dt: &Cube<T>) -> T {
+    let to_t = |x: f64| -> T { <T as NumCast>::from(x).unwrap() };
+    let mut du = T::zero();
     for n in 0..=m {
-        du += (1.0 / r_mag.powf(n as f64 + 1.0))
+        let nf = to_t(n as f64);
+        du += (T::one() / r_mag.powf(nf + T::one()))
               * du_dc_tilde(m, n, tk, a, b, e, ta, dt);
     }
     -du * g
@@ -257,12 +261,14 @@ pub fn du_c(g: f64, m: usize, tk: &[Vec<f64>],
 /// Hou 2016 and the C++ code — this is the *energy*, not the force).
 ///
 /// Mirrors `double potential(...)`.
-pub fn potential(g: f64, m: usize, tk: &[Vec<f64>],
-                 a: &[f64], b: &[f64], e: Vec3, r_mag: f64,
-                 ta: &Cube, tbp: &Cube) -> f64 {
-    let mut u = 0.0_f64;
+pub fn potential<T: Scalar>(g: T, m: usize, tk: &[Vec<f64>],
+                            a: &[f64], b: &[f64], e: Vec3<T>, r_mag: T,
+                            ta: &Cube<T>, tbp: &Cube<T>) -> T {
+    let to_t = |x: f64| -> T { <T as NumCast>::from(x).unwrap() };
+    let mut u = T::zero();
     for n in 0..=m {
-        u += (1.0 / r_mag.powf(n as f64 + 1.0))
+        let nf = to_t(n as f64);
+        u += (T::one() / r_mag.powf(nf + T::one()))
              * u_tilde(m, n, tk, a, b, e, ta, tbp);
     }
     -u * g

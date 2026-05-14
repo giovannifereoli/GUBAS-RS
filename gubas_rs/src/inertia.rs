@@ -4,8 +4,9 @@
 // Units: km for length, kg for mass (as in the original code).
 
 use crate::coefficients::ifact;
-use crate::math3::{Mat3, Vec3, det3};
+use crate::math3::{Mat3, Scalar, Vec3, det3};
 use crate::types::Cube;
+use num_traits::NumCast;
 
 // ── Q_ijk ─────────────────────────────────────────────────────────────────────
 
@@ -241,13 +242,14 @@ pub fn ell_mass_params_met(order: usize, order_body: usize,
 /// Rotate inertia integrals from body-fixed frame to A frame using rotation
 /// matrix C (maps from B to A).  Returns a new Cube `Tp`.
 ///
+/// Generic over `T` so dual-number types can flow through for auto-diff.
 /// Mirrors `void inertia_rot(mat C, int q, cube* T, cube* Tp)`.
-pub fn inertia_rot(c: Mat3, q: usize, t: &Cube) -> Cube {
+pub fn inertia_rot<T: Scalar>(c: Mat3<T>, q: usize, t: &Cube<T>) -> Cube<T> {
     let mut tp = Cube::new(q);
     for l in 0..=q {
         for m in 0..=(q - l) {
             for n in 0..=(q - l - m) {
-                let mut val = 0.0_f64;
+                let mut val = T::zero();
                 for i1 in 0..=l {
                     for j1 in 0..=(l - i1) {
                         let cl = ifact(l) / (ifact(i1) * ifact(j1) * ifact(l - i1 - j1));
@@ -261,7 +263,8 @@ pub fn inertia_rot(c: Mat3, q: usize, t: &Cube) -> Cube {
                                         let sum_j = j1 + j2 + j3;
                                         let sum_k = l + m + n - sum_i - sum_j;
                                         if sum_i <= q && sum_j <= q && sum_k <= q {
-                                            val += cl * cm * cn
+                                            let coeff = <T as NumCast>::from(cl * cm * cn).unwrap();
+                                            val += coeff
                                                 * c[0][0].powi(i1 as i32) * c[0][1].powi(j1 as i32)
                                                   * c[0][2].powi((l - i1 - j1) as i32)
                                                 * c[1][0].powi(i2 as i32) * c[1][1].powi(j2 as i32)
@@ -288,13 +291,14 @@ pub fn inertia_rot(c: Mat3, q: usize, t: &Cube) -> Cube {
 /// Partial of the rotated inertia integral Cube with respect to rotation
 /// matrix element C(row, col).
 ///
+/// Generic over `T` for auto-diff.
 /// Mirrors `void dT_dc(int i, int j, mat C, int q, cube* TA, cube* dT)`.
-pub fn dt_dc(row: usize, col: usize, c: Mat3, q: usize, t: &Cube) -> Cube {
+pub fn dt_dc<T: Scalar>(row: usize, col: usize, c: Mat3<T>, q: usize, t: &Cube<T>) -> Cube<T> {
     let mut dt = Cube::new(q);
     for l in 0..=q {
         for m in 0..=(q - l) {
             for n in 0..=(q - l - m) {
-                let mut val = 0.0_f64;
+                let mut val = T::zero();
                 for i1 in 0..=l {
                     for j1 in 0..=(l - i1) {
                         let cl = ifact(l) / (ifact(i1) * ifact(j1) * ifact(l - i1 - j1));
@@ -314,7 +318,8 @@ pub fn dt_dc(row: usize, col: usize, c: Mat3, q: usize, t: &Cube) -> Cube {
                                                 i2, j2, m - i2 - j2,
                                                 i3, j3, n - i3 - j3,
                                             );
-                                            val += cl * cm * cn * cv * t.get(si, sj, sk);
+                                            let coeff = <T as NumCast>::from(cl * cm * cn).unwrap();
+                                            val += coeff * cv * t.get(si, sj, sk);
                                         }
                                     }
                                 }
@@ -329,34 +334,37 @@ pub fn dt_dc(row: usize, col: usize, c: Mat3, q: usize, t: &Cube) -> Cube {
     dt
 }
 
-/// Compute the rotation-matrix coefficient `c` for a specific (row, col)
-/// partial in the `dT_dc` calculation.  Returns 0 if the relevant exponent
-/// would produce a negative power (i.e., the term vanishes in the partial).
-fn rotation_partial_coeff(row: usize, col: usize, c: Mat3,
-                           i1: usize, j1: usize, k1: usize,
-                           i2: usize, j2: usize, k2: usize,
-                           i3: usize, j3: usize, k3: usize) -> f64 {
-    // Build the "base" product of all C elements except the one being differentiated
-    let base = c[0][0].powi(i1 as i32) * c[0][1].powi(j1 as i32) * c[0][2].powi(k1 as i32)
-             * c[1][0].powi(i2 as i32) * c[1][1].powi(j2 as i32) * c[1][2].powi(k2 as i32)
-             * c[2][0].powi(i3 as i32) * c[2][1].powi(j3 as i32) * c[2][2].powi(k3 as i32);
-    // The exponent of C[row][col] in the base product:
+/// Compute `exp * C[row][col]^(exp-1) * product-of-all-other-C-elements`.
+///
+/// This is the power-rule partial for the monomial of rotation matrix elements
+/// that appears in each term of `inertia_rot`.  Computing it without division
+/// by `C[row][col]` keeps the function correct for dual-number types and when
+/// a matrix element is exactly zero.
+fn rotation_partial_coeff<T: Scalar>(row: usize, col: usize, c: Mat3<T>,
+                                     i1: usize, j1: usize, k1: usize,
+                                     i2: usize, j2: usize, k2: usize,
+                                     i3: usize, j3: usize, k3: usize) -> T {
     let exp = match (row, col) {
         (0, 0) => i1, (0, 1) => j1, (0, 2) => k1,
         (1, 0) => i2, (1, 1) => j2, (1, 2) => k2,
         (2, 0) => i3, (2, 1) => j3, (2, 2) => k3,
         _ => unreachable!(),
     };
-    if exp == 0 { return 0.0; }
-    // d/dC[row][col] of C[row][col]^exp = exp * C[row][col]^(exp-1)
-    // = exp / C[row][col]  *  base  (but we must avoid dividing by zero)
-    let c_val = c[row][col];
-    if c_val == 0.0 {
-        // limit: exp * 0^(exp-1).  Only non-zero when exp == 1.
-        if exp == 1 { (exp as f64) * base } else { 0.0 }
-    } else {
-        (exp as f64) * base / c_val
-    }
+    if exp == 0 { return T::zero(); }
+    // Reduce the exponent of c[row][col] by 1 (power rule), leave others unchanged.
+    let ei1 = if (row, col) == (0, 0) { i1 - 1 } else { i1 };
+    let ej1 = if (row, col) == (0, 1) { j1 - 1 } else { j1 };
+    let ek1 = if (row, col) == (0, 2) { k1 - 1 } else { k1 };
+    let ei2 = if (row, col) == (1, 0) { i2 - 1 } else { i2 };
+    let ej2 = if (row, col) == (1, 1) { j2 - 1 } else { j2 };
+    let ek2 = if (row, col) == (1, 2) { k2 - 1 } else { k2 };
+    let ei3 = if (row, col) == (2, 0) { i3 - 1 } else { i3 };
+    let ej3 = if (row, col) == (2, 1) { j3 - 1 } else { j3 };
+    let ek3 = if (row, col) == (2, 2) { k3 - 1 } else { k3 };
+    let prod = c[0][0].powi(ei1 as i32) * c[0][1].powi(ej1 as i32) * c[0][2].powi(ek1 as i32)
+             * c[1][0].powi(ei2 as i32) * c[1][1].powi(ej2 as i32) * c[1][2].powi(ek2 as i32)
+             * c[2][0].powi(ei3 as i32) * c[2][1].powi(ej3 as i32) * c[2][2].powi(ek3 as i32);
+    <T as NumCast>::from(exp as f64).unwrap() * prod
 }
 
 // ── CSV helpers for saving IA / IB ───────────────────────────────────────────

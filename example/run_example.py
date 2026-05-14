@@ -33,7 +33,7 @@ os.chdir(SCRIPT_DIR)
 # Make sure the repo root's gubas package is importable
 REPO_ROOT = os.path.dirname(SCRIPT_DIR)
 if REPO_ROOT not in sys.path:
-    sys.path.insert(0, REPO_ROOT)
+    sys.path.append(REPO_ROOT)  # append so venv site-packages take priority
 
 from gubas.config import hou_config_read
 from gubas.icfile import write_icfile
