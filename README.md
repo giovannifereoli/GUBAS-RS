@@ -41,7 +41,7 @@ gubas_RUST/
 │   ├── IDP.csv / IDS.csv       Principal moments of inertia
 │   ├── stokes_utils.py         Stokes matrix + pseudoinverse + conversion utilities
 │   ├── run_example.py          Basic trajectory example
-│   ├── run_example_OD.py       STM propagation + EKF-style interface
+│   ├── run_example_OD.py       STM propagation + OD-style interface
 │   ├── run_example_OD_stokes.py   Single-body C/S sensitivity demo
 │   └── run_example_OD_stokes_2.py Both-body C/S sensitivity demo (OD-ready)
 ├── gubas/                      Legacy Python package (config, post-processing)
@@ -263,7 +263,7 @@ idx_a = model.theta_indices_a
 idx_b = model.theta_indices_b
 ```
 
-#### Interface A — point evaluation for EKF/UKF
+#### Interface A — point evaluation for OD
 
 Returns ż and A_aug at a single (z, t).  Use this to drive your own covariance propagation Ṗ = A·P + P·Aᵀ + Q.
 
@@ -412,7 +412,7 @@ phi_xcs_b, _, _ = convert_phi_xt_to_cs(phi_xtb, idx_b, 2, 2)
 # phi_xcs_a[k]: (30, 5) — partials ∂x(t_k)/∂[C20,C21,S21,C22,S22] primary
 # phi_xcs_b[k]: (30, 5) — same for secondary
 
-# For EKF at step k — get A_aug for covariance propagation
+# For OD at step k — get A_aug for covariance propagation
 z_k = np.concatenate([xs[k], theta0])
 zdot, A_flat = model.eval(z_k.tolist(), t_eval[k])
 A_aug = np.array(A_flat).reshape(N_AUG, N_AUG)
