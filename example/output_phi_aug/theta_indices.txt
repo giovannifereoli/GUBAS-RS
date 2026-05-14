@@ -1,7 +1,13 @@
-# k  i  j  k_idx  (T_a[i][j][k_idx] entries, degree l=i+j+k)
-0 0 0 2
-1 0 1 1
-2 0 2 0
-3 1 0 1
-4 1 1 0
-5 2 0 0
+# col  body  i  j  k
+0  A  0 0 2
+1  A  0 1 1
+2  A  0 2 0
+3  A  1 0 1
+4  A  1 1 0
+5  A  2 0 0
+6  B  0 0 2
+7  B  0 1 1
+8  B  0 2 0
+9  B  1 0 1
+10  B  1 1 0
+11  B  2 0 0
