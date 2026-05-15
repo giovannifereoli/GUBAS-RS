@@ -280,3 +280,209 @@ pub fn stokes_row_labels(min_degree: usize, max_degree: usize)
     }
     out
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::Cube;
+
+    fn close(a: f64, b: f64, tol: f64) {
+        assert!((a - b).abs() < tol, "expected {b:.6e}, got {a:.6e} (diff={:.2e})", (a-b).abs());
+    }
+
+    // ── inertia_indices ───────────────────────────────────────────────────────
+
+    #[test]
+    fn inertia_indices_degree2_count() {
+        // Monomials of total degree 2: (2,0,0),(1,1,0),(1,0,1),(0,2,0),(0,1,1),(0,0,2) → 6
+        let idx = inertia_indices(2, 2);
+        assert_eq!(idx.len(), 6);
+        // All must satisfy i+j+k = 2
+        for (i, j, k) in &idx { assert_eq!(i + j + k, 2); }
+    }
+
+    #[test]
+    fn inertia_indices_cumulative_count() {
+        // l=0: 1,  l=1: 3,  l=2: 6 → total 0..=2: 10
+        let idx = inertia_indices(0, 2);
+        assert_eq!(idx.len(), 10);
+    }
+
+    #[test]
+    fn inertia_indices_includes_pure_axes() {
+        let idx = inertia_indices(2, 2);
+        assert!(idx.contains(&(2, 0, 0)));
+        assert!(idx.contains(&(0, 2, 0)));
+        assert!(idx.contains(&(0, 0, 2)));
+        assert!(idx.contains(&(1, 1, 0)));
+    }
+
+    // ── stokes_row_labels ─────────────────────────────────────────────────────
+
+    #[test]
+    fn stokes_row_labels_degree2() {
+        let labels = stokes_row_labels(2, 2);
+        // C20, C21, S21, C22, S22  → 5 rows
+        assert_eq!(labels.len(), 5);
+        assert_eq!(labels[0], (2, 0, false)); // C20
+        assert_eq!(labels[1], (2, 1, false)); // C21
+        assert_eq!(labels[2], (2, 1, true));  // S21
+        assert_eq!(labels[3], (2, 2, false)); // C22
+        assert_eq!(labels[4], (2, 2, true));  // S22
+    }
+
+    #[test]
+    fn stokes_row_labels_range_count() {
+        // For l=2..=4: 5 + 7 + 9 = 21 rows
+        let labels = stokes_row_labels(2, 4);
+        assert_eq!(labels.len(), 21);
+    }
+
+    // ── nijk_to_clm_slm — point-mass / zeroth degree ─────────────────────────
+
+    #[test]
+    fn c00_is_one_for_any_body() {
+        // C_{00} = T_{000} / (mass * r0^0) = 1 by normalization
+        let mass = 1.23e12;
+        let mut ta = Cube::<f64>::new(4);
+        ta.set(0, 0, 0, mass);
+        ta.set(2, 0, 0, mass * 0.1);   // some non-zero higher moments
+        ta.set(0, 2, 0, mass * 0.08);
+        ta.set(0, 0, 2, mass * 0.06);
+        let cs = nijk_to_clm_slm(&ta, mass, 1.0, 2, Normalization::Unnormalized);
+        close(cs.c[0][0], 1.0, 1e-12);
+    }
+
+    // ── nijk_to_clm_slm — sphere (all C_{lm}=0 for l≥1) ─────────────────────
+
+    #[test]
+    fn sphere_degree2_all_zero() {
+        // For a sphere: T_{200}=T_{020}=T_{002}=M*r²/5, all cross-terms=0
+        // → C_{20}=C_{21}=C_{22}=S_{21}=S_{22}=0
+        let mass = 1.0;
+        let r = 2.0; // arbitrary radius (km), r0 = r for self-consistency
+        let mut ta = Cube::<f64>::new(4);
+        ta.set(0, 0, 0, mass);
+        ta.set(2, 0, 0, mass * r * r / 5.0);
+        ta.set(0, 2, 0, mass * r * r / 5.0);
+        ta.set(0, 0, 2, mass * r * r / 5.0);
+        let cs = nijk_to_clm_slm(&ta, mass, r, 2, Normalization::Unnormalized);
+        close(cs.c[2][0], 0.0, 1e-15);
+        close(cs.c[2][1], 0.0, 1e-15);
+        close(cs.c[2][2], 0.0, 1e-15);
+        close(cs.s[2][1], 0.0, 1e-15);
+        close(cs.s[2][2], 0.0, 1e-15);
+    }
+
+    // ── nijk_to_clm_slm — oblate spheroid analytic C20 ───────────────────────
+
+    #[test]
+    fn oblate_c20_analytic() {
+        // Oblate spheroid: equatorial semi-axes a=b=2 km, polar c=1 km.
+        // Using r0 = 1 km, mass = 1 kg (arbitrary — cancels in N_{ijk}).
+        //
+        // T_{200}=T_{020}=M*a²/5=M*4/5,  T_{002}=M*c²/5=M/5.
+        //
+        // Tricarico Eq.16 for C_{20}:
+        //   C_{20} = (1/4)(4*N_{002} - 2*N_{020} - 2*N_{200})
+        //          = (1/4)(4*(1/5) - 2*(4/5) - 2*(4/5))  [r0=1, mass cancels]
+        //          = (1/4)(-12/5) = -3/5
+        let mass = 1.0;
+        let r0   = 1.0;
+        let a = 2.0; let c = 1.0;
+        let mut ta = Cube::<f64>::new(4);
+        ta.set(0, 0, 0, mass);
+        ta.set(2, 0, 0, mass * a * a / 5.0);
+        ta.set(0, 2, 0, mass * a * a / 5.0);
+        ta.set(0, 0, 2, mass * c * c / 5.0);
+        let cs = nijk_to_clm_slm(&ta, mass, r0, 2, Normalization::Unnormalized);
+        close(cs.c[2][0], -3.0 / 5.0, 1e-14);
+        // Oblate with a=b → C22 = 0 (equatorial symmetry)
+        close(cs.c[2][2], 0.0, 1e-14);
+        close(cs.s[2][2], 0.0, 1e-14);
+    }
+
+    #[test]
+    fn triaxial_c22_nonzero() {
+        // Triaxial body: a≠b (equatorial asymmetry) → C22 ≠ 0.
+        // C_{22} = 0.25 * 12 * (N_{200} - N_{020})  (derived in Tricarico Eq.16 for m=2)
+        //        = 3 * (N_{200} - N_{020})
+        // With r0=1: N_{ijk} = T_{ijk}/mass.
+        let mass = 1.0;
+        let a = 3.0; let b = 2.0; let c = 1.0;
+        let mut ta = Cube::<f64>::new(4);
+        ta.set(0, 0, 0, mass);
+        ta.set(2, 0, 0, mass * a * a / 5.0);
+        ta.set(0, 2, 0, mass * b * b / 5.0);
+        ta.set(0, 0, 2, mass * c * c / 5.0);
+        let cs = nijk_to_clm_slm(&ta, mass, 1.0, 2, Normalization::Unnormalized);
+        // Expected: 3*(a²/5 - b²/5) = 3*(9-4)/5 = 3
+        let expected_c22 = 3.0 * (a * a - b * b) / 5.0;
+        close(cs.c[2][2], expected_c22, 1e-14);
+        // S22 = 0 for a body aligned with principal axes
+        close(cs.s[2][2], 0.0, 1e-14);
+    }
+
+    // ── stokes_matrix — shape ─────────────────────────────────────────────────
+
+    #[test]
+    fn stokes_matrix_shape_degree2() {
+        let theta = inertia_indices(2, 2);
+        let mat = stokes_matrix(&theta, 1.0, 1.0, 2, 2, Normalization::Unnormalized);
+        // 5 rows (C20, C21, S21, C22, S22),  6 columns (monomials of degree 2)
+        assert_eq!(mat.len(), 5);
+        assert_eq!(mat[0].len(), 6);
+    }
+
+    #[test]
+    fn stokes_matrix_shape_degree2_to_4() {
+        let theta = inertia_indices(2, 4);
+        // n_theta = 6 + 10 + 15 = 31
+        assert_eq!(theta.len(), 31);
+        let mat = stokes_matrix(&theta, 1.0, 1.0, 2, 4, Normalization::Unnormalized);
+        // n_cs = 5 + 7 + 9 = 21
+        assert_eq!(mat.len(), 21);
+        for row in &mat { assert_eq!(row.len(), 31); }
+    }
+
+    // ── Consistency: stokes_matrix row == nijk_to_clm_slm column ─────────────
+
+    #[test]
+    fn matrix_times_nvec_equals_direct_cs() {
+        // With mass=1, r0=1: M * N_flat should reproduce C/S from nijk_to_clm_slm.
+        // We test an oblate spheroid (all cross-terms zero so N is sparse).
+        let mass = 1.0;
+        let a = 2.0; let c = 1.0;
+        let mut ta = Cube::<f64>::new(4);
+        ta.set(0, 0, 0, mass);
+        ta.set(2, 0, 0, mass * a * a / 5.0);
+        ta.set(0, 2, 0, mass * a * a / 5.0);
+        ta.set(0, 0, 2, mass * c * c / 5.0);
+
+        let theta = inertia_indices(2, 2);
+        let mat = stokes_matrix(&theta, mass, 1.0, 2, 2, Normalization::Unnormalized);
+        let cs  = nijk_to_clm_slm(&ta, mass, 1.0, 2, Normalization::Unnormalized);
+
+        // Build N vector (theta is degree-2 indices only)
+        let n_vec: Vec<f64> = theta.iter()
+            .map(|&(i, j, k)| ta.get(i, j, k) / mass)   // N_{ijk} = T/(mass * r0^2), r0=1
+            .collect();
+
+        // Ordered rows: C20, C21, S21, C22, S22
+        let c_from_mat: Vec<f64> = mat.iter().map(|row|
+            row.iter().zip(n_vec.iter()).map(|(m, n)| m * n).sum()
+        ).collect();
+
+        let labels = stokes_row_labels(2, 2);
+        let c_direct: Vec<f64> = labels.iter().map(|&(l, m, is_sin)| {
+            if is_sin { cs.s[l][m] } else { cs.c[l][m] }
+        }).collect();
+
+        for (i, (&cf, &cd)) in c_from_mat.iter().zip(c_direct.iter()).enumerate() {
+            assert!((cf - cd).abs() < 1e-13,
+                "row {i}: M*N={cf:.6e}, direct={cd:.6e}");
+        }
+    }
+}

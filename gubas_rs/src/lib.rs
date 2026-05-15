@@ -920,27 +920,57 @@ impl DynamicsModel {
 }
 
 // ── AugmentedDynamicsModel ───────────────────────────────────────────────────
-//
-// Callable OD interface for the augmented system z = [x(30); θ_a(N_a); θ_b(N_b)].
-// Both bodies are estimated simultaneously with independent degree/order selection.
-//
-// Python usage:
-//   model = gubas_rs.AugmentedDynamicsModel(
-//       min_degree_a=2, max_degree_a=2,   # primary inertia integrals
-//       min_degree_b=2, max_degree_b=2,   # secondary inertia integrals
-//   )
-//   zdot, A_aug = model.eval(z, t)        # point evaluation for EKF/UKF
-//   rhs  = model.eval_stm(z_phi_flat, t) # full ODE RHS for scipy
-//
-// Φ_aug block layout  (n_aug = 30+N_a+N_b):
-//   ┌──────────┬────────────┬────────────┐
-//   │ Φ_xx     │ Φ_xθ_a    │ Φ_xθ_b    │  ← 30 rows
-//   ├──────────┼────────────┼────────────┤
-//   │ 0        │ I_Na       │ 0          │  ← N_a rows
-//   ├──────────┼────────────┼────────────┤
-//   │ 0        │ 0          │ I_Nb       │  ← N_b rows
-//   └──────────┴────────────┴────────────┘
 
+/// Augmented dynamics model for simultaneous OD of both bodies.
+///
+/// Exposes the augmented system z = [x(30); θ_a(N_a); θ_b(N_b)] where:
+///   - x      : standard 30-element F2BP state (pos, vel, attitude, angular vel)
+///   - θ_a    : primary   inertia integrals T_a[i,j,k] at selected degrees
+///   - θ_b    : secondary inertia integrals T_b[i,j,k] at selected degrees
+///
+/// **Augmented Jacobian block structure** (n_aug = 30 + N_a + N_b):
+///
+/// ```
+///   A_aug = | A   B_a  B_b |    A[i,j]  = ∂f_i/∂x_j
+///           | 0   0    0   |    B_a[i,k] = ∂f_i/∂θ_a_k
+///           | 0   0    0   |    B_b[i,k] = ∂f_i/∂θ_b_k
+/// ```
+///
+/// **Φ_aug block structure:**
+///
+/// ```
+///   Φ_aug = | Φ_xx   Φ_xθ_a   Φ_xθ_b |   ← 30 rows (propagated)
+///           | 0      I_Na     0       |   ← N_a rows (trivial: θ̇=0)
+///           | 0      0        I_Nb    |   ← N_b rows (trivial: θ̇=0)
+/// ```
+///
+/// # Example
+///
+/// ```python
+/// import gubas_rs, numpy as np
+/// from scipy.integrate import solve_ivp
+///
+/// model = gubas_rs.AugmentedDynamicsModel(
+///     min_degree_a=2, max_degree_a=2,
+///     min_degree_b=2, max_degree_b=2,
+/// )
+///
+/// # Build initial augmented state
+/// z0     = np.concatenate([x0, model.theta_nominal])
+/// phi0   = np.eye(model.n_aug).ravel()
+/// zphi0  = np.concatenate([z0, phi0])
+///
+/// # Propagate with scipy (interface B)
+/// sol = solve_ivp(
+///     lambda t, zp: model.eval_stm(zp.tolist(), t),
+///     [t0, tf], zphi0, method="DOP853", rtol=1e-12,
+/// )
+/// phi_aug = sol.y[model.n_aug:].T.reshape(-1, model.n_aug, model.n_aug)
+///
+/// # Extract partials (Stokes sensitivity post-processing)
+/// phi_xta = phi_aug[:, :30, 30:30+model.n_theta_a]   # (nsteps, 30, N_a)
+/// phi_xtb = phi_aug[:, :30, 30+model.n_theta_a:]      # (nsteps, 30, N_b)
+/// ```
 #[cfg(feature = "extension-module")]
 #[pyclass]
 pub struct AugmentedDynamicsModel {
@@ -1056,11 +1086,21 @@ impl AugmentedDynamicsModel {
             .map(|&(i,j,k)| self.params_dual_base.tb.get(i,j,k).re).collect()
     }
 
-    /// eval(z, t) → (zdot, A_aug_flat)
+    /// Point evaluation of augmented dynamics and Jacobian (for EKF / UKF).
     ///
-    /// z       : list of length n_aug = 30 + N_a + N_b
-    /// zdot    : list length n_aug   (θ̇_a = θ̇_b = 0)
-    /// A_aug_flat: list length n_aug²  (row-major)
+    /// Args:
+    ///     z (list[float]): Augmented state of length n_aug = 30 + N_a + N_b.
+    ///         Layout: z[:30] = x (F2BP state), z[30:30+N_a] = θ_a,
+    ///         z[30+N_a:] = θ_b.
+    ///     t (float): Epoch (s).
+    ///
+    /// Returns:
+    ///     (zdot, A_aug_flat) where:
+    ///       - zdot (list, len n_aug): augmented ODE RHS — ẋ for first 30,
+    ///         0 for θ entries (parameters are constant).
+    ///       - A_aug_flat (list, len n_aug²): row-major Jacobian A_aug.
+    ///         Reshape to (n_aug, n_aug) with np.array(A_aug_flat).reshape(n_aug, n_aug).
+    ///         Use A_aug to propagate covariance:  Ṗ = A·P + P·Aᵀ + Q.
     fn eval(&self, z: Vec<f64>, t: f64) -> PyResult<(Vec<f64>, Vec<f64>)> {
         let n_aug = self.n_aug;
         if z.len() != n_aug {
@@ -1074,13 +1114,23 @@ impl AugmentedDynamicsModel {
         Ok((zdot, a_aug))
     }
 
-    /// eval_stm(z_phi_flat, t) → full augmented ODE RHS for scipy.
+    /// Augmented state + STM ODE RHS for external integrators (scipy, etc.).
     ///
-    /// z_phi_flat : list length n_aug + n_aug²
-    ///   first n_aug  : z = [x; θ_a; θ_b]
-    ///   last  n_aug² : Φ_aug flattened row-major  (init to I_{n_aug})
+    /// Args:
+    ///     z_phi_flat (list[float]): Flat vector of length n_aug + n_aug².
+    ///         First n_aug elements: z = [x; θ_a; θ_b].
+    ///         Last  n_aug² elements: Φ_aug flattened row-major
+    ///         (initialize to np.eye(n_aug).ravel()).
+    ///     t (float): Epoch (s).
     ///
-    /// Returns same layout [ż; Φ̇_aug].  Feed directly to solve_ivp.
+    /// Returns:
+    ///     list[float] of length n_aug + n_aug²: [ż; vec(Φ̇_aug)].
+    ///     Pass directly to scipy.integrate.solve_ivp as the ODE RHS::
+    ///
+    ///         sol = solve_ivp(
+    ///             lambda t, zp: model.eval_stm(zp.tolist(), t),
+    ///             [t0, tf], zphi0, method="DOP853", rtol=1e-12,
+    ///         )
     fn eval_stm(&self, z_phi_flat: Vec<f64>, t: f64) -> PyResult<Vec<f64>> {
         let expected = self.n_aug + self.n_aug * self.n_aug;
         if z_phi_flat.len() != expected {

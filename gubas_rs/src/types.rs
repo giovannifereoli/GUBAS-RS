@@ -127,71 +127,123 @@ impl Cube<f64> {
 /// Generic over `T` (defaults to `f64`) so that dual-number types can replace
 /// f64 for auto-differentiation.  Only the physics fields that appear in
 /// differentiated expressions are `T`; toggles and orbit parameters stay `f64`.
+///
+/// # Units
+/// - Length: km
+/// - Mass:   kg
+/// - Time:   s (angles in radians)
 #[derive(Clone)]
 pub struct Params<T = f64> {
-    // Gravity & masses
+    // ── Gravity and masses ────────────────────────────────────────────────────
+    /// Gravitational constant G (km³ kg⁻¹ s⁻²).
     pub g: T,
-    pub m: T,   // reduced mass  Mc*Ms/(Mc+Ms)
-    pub nu: T,  // mass ratio  Ms/(Mc+Ms)
+    /// Reduced mass μ = Mc·Ms/(Mc+Ms) (kg).
+    pub m: T,
+    /// Secondary mass fraction ν = Ms/(Mc+Ms) (dimensionless).
+    pub nu: T,
 
-    // Inertia integrals (in km, kg)
-    pub ta: Cube<T>,  // primary (not rotated)
-    pub tb: Cube<T>,  // secondary (not rotated)
-    pub ia: Vec3<T>,  // primary principal moments  [Ixx, Iyy, Izz]
-    pub ib: Vec3<T>,  // secondary principal moments
+    // ── Inertia integrals ─────────────────────────────────────────────────────
+    /// T_{ijk} for primary (Didymos A) in body-fixed frame (kg·km^{i+j+k}).
+    /// `ta.get(0,0,0)` = total mass Mc.  Not pre-rotated.
+    pub ta: Cube<T>,
+    /// T_{ijk} for secondary (Dimorphos) in body-fixed frame (kg·km^{i+j+k}).
+    /// `tb.get(0,0,0)` = total mass Ms.  Not pre-rotated.
+    pub tb: Cube<T>,
+    /// Principal moments of inertia [Ixx, Iyy, Izz] for primary (kg·km²).
+    pub ia: Vec3<T>,
+    /// Principal moments of inertia [Ixx, Iyy, Izz] for secondary (kg·km²).
+    pub ib: Vec3<T>,
 
-    // Expansion coefficients (combinatorial — always f64)
+    // ── Expansion order and combinatorial coefficients ─────────────────────────
+    /// Truncation order of the mutual gravity expansion (integer l_max).
     pub n: usize,
+    /// T_k combinatorial weights used in the mutual potential sum (Hou 2016).
     pub tk: Vec<Vec<f64>>,
+    /// a_k coefficients in the mutual potential expansion.
     pub a: Vec<f64>,
+    /// b_k coefficients in the mutual potential expansion.
     pub b: Vec<f64>,
 
-    // Toggles (0 = off, 1 = on)
+    // ── Physics toggles (0 = off, 1 = on) ─────────────────────────────────────
+    /// Enable 3rd-body flyby perturbation (hyperbolic orbit).
     pub flyby_toggle: i32,
+    /// Enable heliocentric solar radiation pressure / tide (Keplerian approximation).
     pub helio_toggle: i32,
+    /// Enable self-gravity spin–orbit coupling correction.
     pub sg_toggle: i32,
+    /// Enable tidal torque dissipation (Kaula-style).
     pub tt_toggle: i32,
 
-    // 3rd-body flyby parameters
+    // ── 3rd-body flyby orbital elements ───────────────────────────────────────
+    /// Mass of the flyby perturber (kg).
     pub mplanet: f64,
+    /// Semi-major axis of the flyby hyperbolic orbit (km, negative for hyperbola).
     pub a_hyp: f64,
+    /// Eccentricity of the flyby hyperbolic orbit (> 1).
     pub e_hyp: f64,
+    /// Inclination of the flyby hyperbolic orbit (rad).
     pub i_hyp: f64,
+    /// RAAN of the flyby orbit (rad).
     pub raan_hyp: f64,
+    /// Argument of periapsis of the flyby orbit (rad).
     pub om_hyp: f64,
+    /// Time of periapsis passage of the flyby orbit (s).
     pub tau_hyp: f64,
+    /// Mean motion of the flyby hyperbolic orbit n = sqrt(G·m_planet/|a|³) (rad/s).
     pub n_hyp: f64,
 
-    // Heliocentric orbit parameters
+    // ── Heliocentric orbit parameters ──────────────────────────────────────────
+    /// Mass of the heliocentric solar body used for tidal/radiation perturbation (kg).
     pub msolar: f64,
+    /// Semi-major axis of the heliocentric orbit (km).
     pub a_helio: f64,
+    /// Eccentricity of the heliocentric orbit.
     pub e_helio: f64,
+    /// Inclination of the heliocentric orbit (rad).
     pub i_helio: f64,
+    /// RAAN of the heliocentric orbit (rad).
     pub raan_helio: f64,
+    /// Argument of periapsis of the heliocentric orbit (rad).
     pub om_helio: f64,
+    /// Time of periapsis passage of the heliocentric orbit (s).
     pub tau_helio: f64,
+    /// Mean motion of the heliocentric orbit (rad/s).
     pub n_helio: f64,
 
-    // Legacy circular solar orbit
+    // ── Simplified circular solar orbit (legacy) ───────────────────────────────
+    /// Heliocentric distance (AU, converted internally to km).
     pub sol_rad: f64,
+    /// Definition of 1 AU in km (used with sol_rad).
     pub au_def: f64,
+    /// Mean motion of the circular solar orbit (rad/s).
     pub mean_motion: f64,
 
-    // Tidal torque parameters
+    // ── Tidal torque parameters ────────────────────────────────────────────────
+    /// Tidal Love number k₂ for the primary.
     pub love1: f64,
+    /// Tidal Love number k₂ for the secondary.
     pub love2: f64,
+    /// Reference radius for tidal Love number of primary (km).
     pub refrad1: f64,
+    /// Reference radius for tidal Love number of secondary (km).
     pub refrad2: f64,
+    /// Bulk density of primary (kg/km³).
     pub rho_a: f64,
+    /// Bulk density of secondary (kg/km³).
     pub rho_b: f64,
+    /// Tidal phase lag ε₁ for primary (rad).
     pub eps1: f64,
+    /// Tidal phase lag ε₂ for secondary (rad).
     pub eps2: f64,
 
-    // Modified inertia tensors for LGVI
+    // ── Modified inertia tensors for LGVI integrator ───────────────────────────
+    /// Modified inertia tensor Ĩ_A = 2(½ tr(I_A)·E − I_A) used by LGVI (kg·km²).
     pub ida: Mat3<T>,
+    /// Modified inertia tensor Ĩ_B = 2(½ tr(I_B)·E − I_B) used by LGVI (kg·km²).
     pub idb: Mat3<T>,
 
-    // Solar mass (distinct from msolar which is the perturber mass)
+    // ── Solar mass ─────────────────────────────────────────────────────────────
+    /// Mass of the Sun (kg), used to compute mean motion of the binary's heliocentric orbit.
     pub msun: f64,
 }
 

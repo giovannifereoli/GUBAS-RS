@@ -271,3 +271,158 @@ impl Float for Dual {
         Self::new(self.re.to_radians(), self.eps * R)
     }
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::Dual;
+    use num_traits::Float;
+
+    // Seed a dual number with unit tangent: represents the function x ↦ x at x=v.
+    fn seed(v: f64) -> Dual { Dual::new(v, 1.0) }
+
+    fn close(a: f64, b: f64) { assert!((a - b).abs() < 1e-14, "{a} ≠ {b}"); }
+
+    // ── Arithmetic rules ──────────────────────────────────────────────────────
+
+    #[test]
+    fn mul_product_rule() {
+        // (a + bε)(c + dε) = ac + (ad + bc)ε
+        let x = Dual::new(3.0, 1.0) * Dual::new(2.0, 5.0);
+        close(x.re,  6.0);
+        close(x.eps, 3.0 * 5.0 + 1.0 * 2.0);
+    }
+
+    #[test]
+    fn div_quotient_rule() {
+        // (a + bε)/(c + dε) = a/c + (bc − ad)/c² · ε
+        let a = 6.0; let b = 1.0; let c = 3.0; let d = 0.5;
+        let x = Dual::new(a, b) / Dual::new(c, d);
+        close(x.re,  a / c);
+        close(x.eps, (b * c - a * d) / (c * c));
+    }
+
+    #[test]
+    fn recip_derivative() {
+        // d[1/x]/dx = -1/x²
+        let x = 4.0_f64;
+        let d = seed(x).recip();
+        close(d.eps, -1.0 / (x * x));
+    }
+
+    // ── Transcendental derivatives ─────────────────────────────────────────────
+
+    #[test]
+    fn sin_derivative() {
+        let x = 1.23;
+        let d = seed(x).sin();
+        close(d.re,  x.sin());
+        close(d.eps, x.cos());
+    }
+
+    #[test]
+    fn cos_derivative() {
+        let x = 1.23;
+        let d = seed(x).cos();
+        close(d.re,  x.cos());
+        close(d.eps, -x.sin());
+    }
+
+    #[test]
+    fn tan_derivative() {
+        let x = 0.5;
+        let d = seed(x).tan();
+        let cos_x = x.cos();
+        close(d.eps, 1.0 / (cos_x * cos_x));
+    }
+
+    #[test]
+    fn exp_derivative() {
+        let x = 2.0;
+        let d = seed(x).exp();
+        close(d.re,  x.exp());
+        close(d.eps, x.exp());
+    }
+
+    #[test]
+    fn ln_derivative() {
+        let x = 3.5;
+        let d = seed(x).ln();
+        close(d.re,  x.ln());
+        close(d.eps, 1.0 / x);
+    }
+
+    #[test]
+    fn sqrt_derivative() {
+        let x = 9.0_f64;
+        let d = seed(x).sqrt();
+        close(d.re,  x.sqrt());
+        close(d.eps, 1.0 / (2.0 * x.sqrt()));
+    }
+
+    #[test]
+    fn powi_derivative() {
+        // d[x^3]/dx = 3x²
+        let x = 2.0_f64;
+        let d = seed(x).powi(3);
+        close(d.re,  x.powi(3));
+        close(d.eps, 3.0 * x * x);
+    }
+
+    #[test]
+    fn powi_zero_exponent() {
+        // d[x^0]/dx = 0 (not 0 * x^{-1} which would NaN at x=0)
+        let d = seed(0.0).powi(0);
+        close(d.re,  1.0);
+        close(d.eps, 0.0);
+    }
+
+    // ── Chain rule ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn chain_rule_sin_of_square() {
+        // d[sin(x²)]/dx = 2x cos(x²)
+        let x = 2.0_f64;
+        let xd = seed(x);
+        let d = (xd * xd).sin();
+        close(d.re,  (x * x).sin());
+        close(d.eps, 2.0 * x * (x * x).cos());
+    }
+
+    #[test]
+    fn chain_rule_exp_of_ln() {
+        // d[exp(ln(x))]/dx = d[x]/dx = 1
+        let x = 5.0;
+        let d = seed(x).ln().exp();
+        close(d.re,  x);
+        close(d.eps, 1.0);
+    }
+
+    // ── Hyperbolic ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn sinh_derivative() {
+        let x = 1.0;
+        let d = seed(x).sinh();
+        close(d.eps, x.cosh());
+    }
+
+    #[test]
+    fn tanh_derivative() {
+        let x = 0.8;
+        let t = x.tanh();
+        let d = seed(x).tanh();
+        close(d.eps, 1.0 - t * t);
+    }
+
+    // ── Ordering ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn ordering_by_real_part() {
+        let a = Dual::new(1.0, 100.0);
+        let b = Dual::new(2.0,  -5.0);
+        assert!(a < b);
+        assert!(b > a);
+    }
+}

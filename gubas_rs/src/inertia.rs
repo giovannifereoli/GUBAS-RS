@@ -385,3 +385,121 @@ pub fn load_moi_csv(path: &str) -> std::io::Result<Vec3> {
         .collect();
     Ok([v[0], v[1], v[2]])
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::f64::consts::PI;
+
+    fn close(a: f64, b: f64, tol: f64) {
+        assert!((a - b).abs() < tol,
+            "expected {b:.10e}, got {a:.10e} (relerr={:.2e})",
+            (a - b).abs() / b.abs().max(1e-300));
+    }
+
+    // ── Ellipsoid analytic inertia integrals ──────────────────────────────────
+    //
+    // ell_mass_params_met takes semi-axes in metres, density in kg/km³.
+    // It converts to km internally:  mass = 4/3 * π * ρ * a_km * b_km * c_km.
+    //
+    // T_{200} = mass * a_km² / 5,   T_{020} = mass * b_km² / 5,   T_{002} = mass * c_km² / 5.
+
+    #[test]
+    fn ellipsoid_mass_formula() {
+        // Semi-axes: a=2 km, b=1.5 km, c=1 km  → in metres: 2000, 1500, 1000
+        let rho = 1000.0; // kg/km³ (1 g/cm³)
+        let (a, b, c) = (2000.0_f64, 1500.0_f64, 1000.0_f64); // metres
+        let (a_km, b_km, c_km) = (a / 1000.0, b / 1000.0, c / 1000.0);
+
+        let (_moi, ta) = ell_mass_params_met(4, 2, rho, a, b, c);
+        let mass = ta.get(0, 0, 0);
+        let expected_mass = 4.0 / 3.0 * PI * rho * a_km * b_km * c_km;
+        close(mass, expected_mass, expected_mass * 1e-13);
+    }
+
+    #[test]
+    fn ellipsoid_t200_analytic() {
+        let rho = 1000.0;
+        let (a, b, c) = (2000.0_f64, 1500.0_f64, 1000.0_f64);
+        let (a_km, _b_km, _c_km) = (a / 1000.0, b / 1000.0, c / 1000.0);
+
+        let (_moi, ta) = ell_mass_params_met(4, 2, rho, a, b, c);
+        let mass = ta.get(0, 0, 0);
+        let t200 = ta.get(2, 0, 0);
+        let expected = mass * a_km * a_km / 5.0;
+        close(t200, expected, expected * 1e-13);
+    }
+
+    #[test]
+    fn ellipsoid_t020_analytic() {
+        let rho = 1000.0;
+        let (a, b, c) = (2000.0_f64, 1500.0_f64, 1000.0_f64);
+        let (_a_km, b_km, _c_km) = (a / 1000.0, b / 1000.0, c / 1000.0);
+
+        let (_moi, ta) = ell_mass_params_met(4, 2, rho, a, b, c);
+        let mass = ta.get(0, 0, 0);
+        let t020 = ta.get(0, 2, 0);
+        let expected = mass * b_km * b_km / 5.0;
+        close(t020, expected, expected * 1e-13);
+    }
+
+    #[test]
+    fn ellipsoid_t002_analytic() {
+        let rho = 1000.0;
+        let (a, b, c) = (2000.0_f64, 1500.0_f64, 1000.0_f64);
+        let (_a_km, _b_km, c_km) = (a / 1000.0, b / 1000.0, c / 1000.0);
+
+        let (_moi, ta) = ell_mass_params_met(4, 2, rho, a, b, c);
+        let mass = ta.get(0, 0, 0);
+        let t002 = ta.get(0, 0, 2);
+        let expected = mass * c_km * c_km / 5.0;
+        close(t002, expected, expected * 1e-13);
+    }
+
+    #[test]
+    fn sphere_moments_equal() {
+        // For a=b=c (sphere), T_{200}=T_{020}=T_{002}
+        let side = 1000.0_f64; // 1 km in metres
+        let (_moi, ta) = ell_mass_params_met(4, 2, 1000.0, side, side, side);
+        let t200 = ta.get(2, 0, 0);
+        let t020 = ta.get(0, 2, 0);
+        let t002 = ta.get(0, 0, 2);
+        close(t200, t020, t200 * 1e-14);
+        close(t200, t002, t200 * 1e-14);
+    }
+
+    #[test]
+    fn ellipsoid_moi_formula() {
+        // Ixx = M*(b²+c²)/5,  Iyy = M*(a²+c²)/5,  Izz = M*(a²+b²)/5
+        let rho = 2000.0;
+        let (a, b, c) = (3000.0_f64, 2000.0_f64, 1000.0_f64);
+        let (a_km, b_km, c_km) = (a / 1000.0, b / 1000.0, c / 1000.0);
+        let (moi, ta) = ell_mass_params_met(4, 2, rho, a, b, c);
+        let mass = ta.get(0, 0, 0);
+
+        close(moi[0], mass * (b_km * b_km + c_km * c_km) / 5.0, 1e-8);
+        close(moi[1], mass * (a_km * a_km + c_km * c_km) / 5.0, 1e-8);
+        close(moi[2], mass * (a_km * a_km + b_km * b_km) / 5.0, 1e-8);
+    }
+
+    // ── q_ijk ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn q_ijk_zeroth_order() {
+        // Q(0,0,0) = 0!*0!*0! / 3! = 1/6
+        let q = q_ijk(0.0, 0.0, 0.0);
+        assert!((q - 1.0 / 6.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn q_ijk_symmetry() {
+        // Q is symmetric in its arguments
+        let q012 = q_ijk(0.0, 1.0, 2.0);
+        let q102 = q_ijk(1.0, 0.0, 2.0);
+        let q210 = q_ijk(2.0, 1.0, 0.0);
+        assert!((q012 - q102).abs() < 1e-15);
+        assert!((q012 - q210).abs() < 1e-15);
+    }
+}

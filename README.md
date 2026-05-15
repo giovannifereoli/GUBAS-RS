@@ -33,6 +33,9 @@ gubas_RUST/
 │       ├── coefficients.rs     Hou expansion coefficients (tk, a, b)
 │       ├── orbit.rs            Keplerian orbit utilities
 │       └── math3.rs            3-vector / 3×3-matrix primitives
+├── tests/                      Python pytest suite (no Rust extension required)
+│   ├── conftest.py             adds example/ to sys.path automatically
+│   └── test_stokes_utils.py    24 tests for stokes_utils.py
 ├── example/
 │   ├── ic_input.txt            Didymos–Dimorphos initial conditions
 │   ├── Didymos_A_facet.csv     Primary shape model — tetrahedra
@@ -44,6 +47,8 @@ gubas_RUST/
 │   ├── run_example_OD.py       STM propagation + OD-style interface
 │   ├── run_example_OD_stokes.py   Single-body C/S sensitivity demo
 │   └── run_example_OD_stokes_2.py Both-body C/S sensitivity demo (OD-ready)
+├── pytest.ini                  Pytest configuration (testpaths = tests)
+├── requirements.txt            Python dependencies
 ├── gubas/                      Legacy Python package (config, post-processing)
 └── General_Use_Binary_Asteroid_Simulator_Tool_User_Guide.pdf
 ```
@@ -86,6 +91,69 @@ cd gubas_rs
 cargo build --release
 # binary: gubas_rs/target/release/hou_cpp_final
 ```
+
+---
+
+## Testing
+
+### Rust unit tests
+
+The Rust test suite covers every core module with analytic reference checks:
+
+| Module | Tests | What is verified |
+|--------|-------|-----------------|
+| `dual.rs` | 16 | Product/quotient/chain rules; sin, cos, exp, ln, sqrt, powi derivatives |
+| `math3.rs` | 15 | Cross product basis, tilde↔cross, mat_mul, transpose, det, inv3, norm |
+| `stokes.rs` | 13 | `inertia_indices` count; `stokes_row_labels` ordering; C₀₀=1; sphere C₂ₘ=0; oblate C₂₀=−3/5; triaxial C₂₂ analytic; M·N = direct `nijk_to_clm_slm` |
+| `inertia.rs` | 9 | Ellipsoid mass, T₂₀₀/T₀₂₀/T₀₀₂, MOI formulas; sphere moments equal; q_ijk symmetry |
+| `stm.rs` | 2 | AD Jacobian exact to machine eps; AD vs FD < 1e-5 |
+
+Run from `gubas_rs/`:
+
+```bash
+cd gubas_rs
+cargo test
+```
+
+Expected output:
+
+```
+test result: ok. 55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+### Python pytest suite
+
+The Python tests cover the pure-Python `stokes_utils.py` utilities without requiring the compiled Rust extension:
+
+| Class | Tests | What is verified |
+|-------|-------|-----------------|
+| `TestCsLabels` | 5 | Count (2, 4 degree), exact ordering, C/S interleaving |
+| `TestInertiaLabels` | 1 | Label format `Tijk` |
+| `TestStokesMatrix` | 7 | Shape (degree 2 and 2–4), sphere null space, oblate C₂₀=−3/5, triaxial C₂₂=3, S=0 for aligned body, normalized/unnormalized factor √5 |
+| `TestStokesPseudoinverse` | 5 | M·M⁺=I for degrees 2 and 3, shape, full row rank, null space dim |
+| `TestConvertPhiXtToCs` | 4 | Output shapes (3D/2D input, multi-degree), chain-rule projection identity |
+| `TestContribInternals` | 2 | S_{l,0}=0, wrong-degree contributions = 0 |
+
+Run from the **repo root** (pytest.ini is configured automatically):
+
+```bash
+pip install pytest numpy scipy    # if not already installed
+pytest
+```
+
+Or to be explicit:
+
+```bash
+pytest tests/ -v
+```
+
+Expected output:
+
+```
+24 passed in 0.1s
+```
+
+The `tests/conftest.py` adds `example/` to `sys.path` automatically so no manual path setup is needed.
 
 ---
 

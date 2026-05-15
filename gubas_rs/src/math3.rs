@@ -231,3 +231,160 @@ pub fn state_combine(x: [f64; 30], terms: &[(&[f64; 30], f64)]) -> [f64; 30] {
     }
     r
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn close(a: f64, b: f64) { assert!((a - b).abs() < 1e-14, "{a} ≠ {b}"); }
+    fn close_v(a: Vec3, b: Vec3) {
+        for i in 0..3 { close(a[i], b[i]); }
+    }
+    fn close_m(a: Mat3, b: Mat3) {
+        for i in 0..3 { for j in 0..3 { close(a[i][j], b[i][j]); } }
+    }
+    fn mat_approx(a: Mat3, b: Mat3, tol: f64) {
+        for i in 0..3 { for j in 0..3 {
+            assert!((a[i][j] - b[i][j]).abs() < tol,
+                "M[{i}][{j}]: {} ≠ {} (tol {tol})", a[i][j], b[i][j]);
+        }}
+    }
+
+    // ── Cross product ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn cross_standard_basis() {
+        // i × j = k
+        close_v(cross([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]), [0.0, 0.0, 1.0]);
+        // j × k = i
+        close_v(cross([0.0, 1.0, 0.0], [0.0, 0.0, 1.0]), [1.0, 0.0, 0.0]);
+        // k × i = j
+        close_v(cross([0.0, 0.0, 1.0], [1.0, 0.0, 0.0]), [0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn cross_anticommutative() {
+        let a = [1.0, 2.0, 3.0];
+        let b = [4.0, -1.0, 0.5];
+        let axb = cross(a, b);
+        let bxa = cross(b, a);
+        close_v(add_v(axb, bxa), [0.0; 3]);
+    }
+
+    #[test]
+    fn cross_self_is_zero() {
+        let v = [3.0, -1.0, 2.0];
+        close_v(cross(v, v), [0.0; 3]);
+    }
+
+    // ── tilde ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn tilde_equiv_to_cross() {
+        // tilde(a) * b  ==  cross(a, b)
+        let a = [1.0, -2.0, 3.0];
+        let b = [0.5, 4.0, -1.0];
+        close_v(mat_vec(tilde(a), b), cross(a, b));
+    }
+
+    // ── Matrix products ───────────────────────────────────────────────────────
+
+    #[test]
+    fn mat_mul_with_identity() {
+        let a: Mat3 = [[1.0, 2.0, 3.0],
+                       [4.0, 5.0, 6.0],
+                       [7.0, 8.0, 9.0]];
+        close_m(mat_mul(a, IDENTITY), a);
+        close_m(mat_mul(IDENTITY, a), a);
+    }
+
+    #[test]
+    fn mat_mul_associative() {
+        let a: Mat3 = [[1.0, 2.0, 0.0], [0.0, 1.0, 3.0], [2.0, 0.0, 1.0]];
+        let b: Mat3 = [[2.0, 1.0, 0.0], [1.0, 0.0, 1.0], [0.0, 1.0, 2.0]];
+        let c: Mat3 = [[0.0, 1.0, 1.0], [1.0, 1.0, 0.0], [1.0, 0.0, 1.0]];
+        close_m(mat_mul(mat_mul(a, b), c), mat_mul(a, mat_mul(b, c)));
+    }
+
+    #[test]
+    fn mat_vec_identity() {
+        let v = [1.0, 2.0, 3.0];
+        close_v(mat_vec(IDENTITY, v), v);
+    }
+
+    // ── Transpose ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn transpose_involutory() {
+        let a: Mat3 = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]];
+        close_m(transpose(transpose(a)), a);
+    }
+
+    #[test]
+    fn transpose_swaps_entries() {
+        let a: Mat3 = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]];
+        let at = transpose(a);
+        for i in 0..3 { for j in 0..3 { close(at[i][j], a[j][i]); } }
+    }
+
+    // ── Determinant ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn det_identity_is_one() {
+        close(det3(IDENTITY), 1.0);
+    }
+
+    #[test]
+    fn det_diagonal_is_product() {
+        let d: Mat3 = [[2.0, 0.0, 0.0], [0.0, 3.0, 0.0], [0.0, 0.0, 5.0]];
+        close(det3(d), 30.0);
+    }
+
+    #[test]
+    fn det_singular_is_zero() {
+        // Rows 0 and 1 identical → singular
+        let a: Mat3 = [[1.0, 2.0, 3.0], [1.0, 2.0, 3.0], [4.0, 5.0, 6.0]];
+        close(det3(a), 0.0);
+    }
+
+    // ── Inverse ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn inv_times_self_is_identity() {
+        let a: Mat3 = [[2.0, 1.0, 0.0], [1.0, 3.0, 1.0], [0.0, 1.0, 2.0]];
+        let ai = inv3(a);
+        mat_approx(mat_mul(a, ai), IDENTITY, 1e-13);
+        mat_approx(mat_mul(ai, a), IDENTITY, 1e-13);
+    }
+
+    // ── Trace ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn trace_diagonal() {
+        let v = [1.0, 2.0, 3.0];
+        close(trace(diag(v)), 6.0);
+    }
+
+    // ── Dot / norm ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn norm_unit_vector() {
+        close(norm([1.0, 0.0, 0.0]), 1.0);
+        close(norm([0.0, 1.0, 0.0]), 1.0);
+        close(norm([0.0, 0.0, 1.0]), 1.0);
+    }
+
+    #[test]
+    fn dot_orthogonal_is_zero() {
+        close(dot([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]), 0.0);
+    }
+
+    #[test]
+    fn dot_self_is_norm_squared() {
+        let v = [3.0, 4.0, 0.0];
+        close(dot(v, v), 25.0);
+        close(norm(v), 5.0);
+    }
+}
