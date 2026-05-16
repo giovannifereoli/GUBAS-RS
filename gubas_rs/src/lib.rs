@@ -240,17 +240,22 @@
 //! cargo test oblate_c20      # any test whose name contains "oblate_c20"
 //! ```
 //!
-//! Key analytic checks performed:
+//! Key analytic checks performed (108 tests across all 11 modules):
 //!
-//! | Module | Representative checks |
-//! |---|---|
-//! | [`dual`] | sin′ = cos, chain rule, powi at zero |
-//! | [`math3`] | i×j = k, det(I) = 1, inv · self = I |
-//! | [`stokes`] | sphere C₂ₘ = 0; oblate C₂₀ = −3/5; triaxial C₂₂ = 3 |
-//! | [`potential`] | order-0 recovers −G·M₁M₂/r and G·M₁M₂/r² force |
-//! | [`dynamics`] | centripetal acceleration = −G(M₁+M₂)/a²; zero torques for n=0 |
-//! | [`orbit`] | vis-viva ½v² = μ/(2a); r·v = 0 at periapsis |
-//! | [`integrators`] | all four integrators produce non-NaN output of correct size |
+//! | Module | Tests | Representative checks |
+//! |---|---:|---|
+//! | [`coefficients`] | 20 | `factorial`, `t_ind` indexing, `tk_calc` analytic values, `a_calc`/`b_calc` seeds |
+//! | [`dual`] | 16 | sin′ = cos, product/chain/quotient rules, powi at zero |
+//! | [`math3`] | 17 | i×j = k, tilde↔cross, det(I) = 1, inv · self = I, norm, trace |
+//! | [`stokes`] | 12 | sphere C₂ₘ = 0; oblate C₂₀ = −3/5; triaxial C₂₂ = 3; M·N = direct |
+//! | [`inertia`] | 8 | Ellipsoid mass, T₂₀₀/T₀₂₀/T₀₀₂ analytic, sphere MOI equal, q\_ijk symmetry |
+//! | [`potential`] | 7 | order-0 recovers −G·M₁M₂/r and G·M₁M₂/r² force; transverse force = 0 |
+//! | [`orbit`] | 8 | vis-viva; r·v = 0 at periapsis; circular |r| = a |
+//! | [`types`] | 9 | `Cube<T>` set/get/add/zeros; `compute_lgvi_inertia` diagonal formula |
+//! | [`dynamics`] | 2 | centripetal acceleration = −G(M₁+M₂)/r²; zero torques for n=0 |
+//! | [`lgvi`] | 3 | outer product values and antisymmetry; monopole radial force |
+//! | [`integrators`] | 4 | all four integrators produce non-NaN output of correct size |
+//! | [`stm`] | 2 | AD Jacobian exact to machine eps; max\|AD−FD\| < 1e-5 |
 //!
 //! ### Python tests — 24 tests (no Rust extension needed)
 //!

@@ -119,19 +119,7 @@ python -c "import gubas_rs; print('ok')"
 
 ## Testing
 
-### Rust unit tests
-
-The Rust test suite covers every core module with analytic reference checks:
-
-| Module | Tests | What is verified |
-|--------|-------|-----------------|
-| `dual.rs` | 16 | Product/quotient/chain rules; sin, cos, exp, ln, sqrt, powi derivatives |
-| `math3.rs` | 15 | Cross product basis, tilde↔cross, mat_mul, transpose, det, inv3, norm |
-| `stokes.rs` | 13 | `inertia_indices` count; `stokes_row_labels` ordering; C₀₀=1; sphere C₂ₘ=0; oblate C₂₀=−3/5; triaxial C₂₂ analytic; M·N = direct `nijk_to_clm_slm` |
-| `inertia.rs` | 9 | Ellipsoid mass, T₂₀₀/T₀₂₀/T₀₀₂, MOI formulas; sphere moments equal; q_ijk symmetry |
-| `stm.rs` | 2 | AD Jacobian exact to machine eps; AD vs FD < 1e-5 |
-
-Run from `gubas_rs/`:
+### Rust unit tests — 108 tests across all 11 modules
 
 ```bash
 cd gubas_rs
@@ -141,33 +129,40 @@ cargo test
 Expected output:
 
 ```
-test result: ok. 55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 108 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 ```
 
-### Python pytest suite
+Every module is covered with analytic reference checks:
 
-The Python tests cover the pure-Python `stokes_utils.py` utilities without requiring the compiled Rust extension:
+| Module | Tests | What is verified |
+|--------|------:|-----------------|
+| `coefficients.rs` | 20 | `factorial`, `ifact`, `t_ind` indexing; `coeff_vec_len`; `tk_calc` analytic values; `a_calc`/`b_calc` seeds |
+| `dual.rs` | 16 | Product/quotient/chain rules; sin, cos, exp, ln, sqrt, powi, tan, tanh, sinh derivatives |
+| `math3.rs` | 17 | i×j=k, anticommutativity, tilde↔cross, mat_mul, transpose, det, inv3, norm, trace |
+| `stokes.rs` | 12 | `inertia_indices` count; label ordering; C₀₀=1; sphere C₂ₘ=0; oblate C₂₀=−3/5; triaxial C₂₂ analytic; M·N = direct `nijk_to_clm_slm` |
+| `inertia.rs` | 8 | Ellipsoid mass, T₂₀₀/T₀₂₀/T₀₀₂ analytic, MOI formulas; sphere moments equal; q_ijk symmetry |
+| `potential.rs` | 7 | `de_dx` diagonal/off-diagonal; monopole U=−GM₁M₂/r; monopole force = GM₁M₂/r²; transverse force = 0 |
+| `orbit.rs` | 8 | Kepler's equation at periapsis/quarter/half period; `kepler2cart` circular |r|=a, r·v=0, vis-viva; periapsis radius |
+| `types.rs` | 9 | `Cube<T>` new/set/get/add/zeros/extremes/order; `compute_lgvi_inertia` diagonal formula, equal moments |
+| `dynamics.rs` | 2 | Point-mass centripetal acceleration = −G(M₁+M₂)/r²; zero torques for n=0 |
+| `lgvi.rs` | 3 | Outer product values and antisymmetry; monopole radial force via `map_partials` |
+| `integrators.rs` | 4 | RK4, ABM, RK7(8), LGVI each produce non-NaN output of correct size |
+| `stm.rs` | 2 | AD Jacobian exact to machine eps; max\|AD−FD\| < 1e-5 |
 
-| Class | Tests | What is verified |
-|-------|-------|-----------------|
-| `TestCsLabels` | 5 | Count (2, 4 degree), exact ordering, C/S interleaving |
-| `TestInertiaLabels` | 1 | Label format `Tijk` |
-| `TestStokesMatrix` | 7 | Shape (degree 2 and 2–4), sphere null space, oblate C₂₀=−3/5, triaxial C₂₂=3, S=0 for aligned body, normalized/unnormalized factor √5 |
-| `TestStokesPseudoinverse` | 5 | M·M⁺=I for degrees 2 and 3, shape, full row rank, null space dim |
-| `TestConvertPhiXtToCs` | 4 | Output shapes (3D/2D input, multi-degree), chain-rule projection identity |
-| `TestContribInternals` | 2 | S_{l,0}=0, wrong-degree contributions = 0 |
-
-Run from the **repo root** (pytest.ini is configured automatically):
+Filter by module or test name:
 
 ```bash
-pip install pytest numpy scipy    # if not already installed
-pytest
+cargo test coefficients::   # only coefficients module
+cargo test monopole         # any test whose name contains "monopole"
 ```
 
-Or to be explicit:
+### Python pytest suite — 24 tests
+
+No compiled Rust extension required. Run from the **repo root**:
 
 ```bash
-pytest tests/ -v
+pytest          # pytest.ini sets testpaths = tests automatically
+pytest -v       # verbose — shows each test name
 ```
 
 Expected output:
@@ -176,7 +171,16 @@ Expected output:
 24 passed in 0.1s
 ```
 
-The `tests/conftest.py` adds `example/` to `sys.path` automatically so no manual path setup is needed.
+| Class | Tests | What is verified |
+|-------|------:|-----------------|
+| `TestCsLabels` | 5 | Count at degree 2 and 4, exact label ordering, C/S interleaving |
+| `TestInertiaLabels` | 1 | Label format `Tijk` |
+| `TestStokesMatrix` | 7 | Shape (degree 2 and 2–4); sphere null space; oblate C₂₀=−3/5; triaxial C₂₂=3; S=0 for aligned body; normalized/unnormalized factor √5 |
+| `TestStokesPseudoinverse` | 5 | M·M⁺=I for degrees 2 and 3; shape; full row rank; null space dim |
+| `TestConvertPhiXtToCs` | 4 | Output shapes (3-D / 2-D input, multi-degree); chain-rule projection identity |
+| `TestContribInternals` | 2 | S_{l,0}=0; wrong-degree contributions = 0 |
+
+`tests/conftest.py` adds `example/` to `sys.path` automatically — no manual path setup needed.
 
 ---
 
