@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["ic_read","run_simulation","run_stm","run_stm_augmented","run_stm_augmented_both"],"mod":["coefficients","dual","dynamics","inertia","integrators","lgvi","math3","orbit","potential","stm","stokes","types"]};

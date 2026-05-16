@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["hamiltonian_map","map_potential_partials_lgvi"]};

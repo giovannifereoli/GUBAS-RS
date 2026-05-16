@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["dt_dc","ell_mass_params_met","inertia_rot","load_moi_csv","poly_inertia","poly_inertia_met","poly_moi","poly_moi_met","q_ijk","save_moi_csv","tet_sums"]};

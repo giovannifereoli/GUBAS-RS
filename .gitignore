@@ -14,3 +14,6 @@ Hamiltonian*.csv
 -r output_t/
 -r output_x/
 ic_input.txt
+target/
+.venv/
+__pycache__/

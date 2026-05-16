@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["Normalization"],"fn":["inertia_indices","nijk_to_clm_slm","stokes_matrix","stokes_row_labels"],"struct":["StokesCoeffs"]};
