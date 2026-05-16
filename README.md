@@ -12,6 +12,24 @@ This repository is a **Rust port** of the original C++ GUBAS integrator, extende
 
 ---
 
+## Quick start
+
+```bash
+git clone https://github.com/<org>/gubas_RUST.git
+cd gubas_RUST
+
+# Sets up .venv, installs Python deps, builds Rust binary, and (optionally) the
+# Python extension — all in one step.
+python initialize.py --maturin
+
+source .venv/bin/activate
+cd example && python run_example.py
+```
+
+See [Installation](#installation) below for manual steps or Windows instructions.
+
+---
+
 ## Repository layout
 
 ```
@@ -59,37 +77,42 @@ gubas_RUST/
 
 ### Prerequisites
 
-- Rust toolchain ≥ 1.75 ([rustup.rs](https://rustup.rs))
-- Python ≥ 3.8
-- `maturin` ≥ 1.0
+| Tool | Minimum version | Where to get it |
+|------|----------------|-----------------|
+| Rust toolchain | ≥ 1.75 | [rustup.rs](https://rustup.rs) |
+| Python | ≥ 3.8 | [python.org](https://python.org) |
+
+### Automated setup (recommended)
+
+`initialize.py` handles everything in one command:
 
 ```bash
-pip install maturin numpy scipy matplotlib
+# Binary + Python extension (recommended for OD / Python use):
+python initialize.py --maturin
+
+# Binary only (no Python extension):
+python initialize.py
 ```
 
-### Build as a Python extension (recommended)
+What it does:
+1. Checks that `cargo` is available.
+2. Creates `.venv` and installs `numpy scipy matplotlib maturin pytest`.
+3. Builds `gubas_rs/target/release/hou_cpp_final` (`cargo build --release`).
+4. `[--maturin]` Runs `maturin develop --release` to install `import gubas_rs`.
+
+### Manual setup
 
 ```bash
-# From repo root — create and activate a virtualenv first
-python -m venv .venv
-source .venv/bin/activate
+# Python dependencies
+python -m venv .venv && source .venv/bin/activate
+pip install numpy scipy matplotlib maturin pytest
 
-cd gubas_rs
+# Rust binary
+cd gubas_rs && cargo build --release
+
+# Python extension (for OD use)
 maturin develop --release
-```
-
-This installs `gubas_rs` directly into your active environment. Test it:
-
-```bash
 python -c "import gubas_rs; print('ok')"
-```
-
-### Build the standalone binary
-
-```bash
-cd gubas_rs
-cargo build --release
-# binary: gubas_rs/target/release/hou_cpp_final
 ```
 
 ---
@@ -564,6 +587,14 @@ pip install numpy scipy matplotlib maturin
 
 ---
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to report bugs, request features, and
+submit pull requests.  In brief: open a GitHub Issue with a minimal reproducible example
+for bugs; run `cargo test` and `pytest` before opening a PR.
+
+---
+
 ## Citation
 
 If you use GUBAS-RS in a publication, please cite the original GUBAS paper:
@@ -603,6 +634,11 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 ## Errata
 
 User Guide Eq. 9: the provided definition of the inertia integrals is mass-normalised; the code and subsequent equations use the non-normalised form.
+
+---
+
+A JOSS paper (`paper.md` / `paper.bib`) is included in the repository root for formal
+software citation.
 
 ---
 

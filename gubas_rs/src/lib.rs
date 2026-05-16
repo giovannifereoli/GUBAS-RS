@@ -41,38 +41,46 @@
 //!
 //! ## Installation
 //!
-//! ### Dependencies
+//! ### Prerequisites
 //!
-//! | Dependency | Version | Purpose |
-//! |---|---|---|
-//! | Rust toolchain | ≥ 1.75 | compile the crate |
-//! | Python | ≥ 3.8 | Python interface and test suite |
-//! | `maturin` | ≥ 1.0 | build the Python extension |
-//! | `numpy` | any | array handling in Python examples |
-//! | `scipy` | any | `solve_ivp` in OD examples |
-//! | `matplotlib` | any | plotting in example scripts |
+//! | Tool | Minimum version |
+//! |---|---|
+//! | Rust toolchain | ≥ 1.75 — install via [rustup.rs](https://rustup.rs) |
+//! | Python | ≥ 3.8 |
 //!
-//! Install Rust via [rustup](https://rustup.rs), then Python dependencies:
+//! Python packages (`numpy`, `scipy`, `matplotlib`, `maturin`, `pytest`) are
+//! listed in `requirements.txt` and installed automatically by `initialize.py`.
+//!
+//! ### Recommended: one-command setup
+//!
+//! Run `initialize.py` from the **repository root** once after cloning:
 //!
 //! ```bash
-//! pip install maturin numpy scipy matplotlib
+//! # Binary + Python extension (needed for OD / Python use):
+//! python initialize.py --maturin
+//!
+//! # Binary only (no Python extension):
+//! python initialize.py
 //! ```
 //!
-//! ### Build as a Python extension (recommended for OD use)
+//! This creates `.venv`, installs all Python dependencies from `requirements.txt`,
+//! builds `gubas_rs/target/release/hou_cpp_final`, and (with `--maturin`) runs
+//! `maturin develop --release` so that `import gubas_rs` works inside `.venv`.
+//!
+//! ### Manual setup
 //!
 //! ```bash
+//! # 1. Python environment
 //! python -m venv .venv && source .venv/bin/activate
-//! cd gubas_rs
-//! maturin develop --release   # installs gubas_rs into the active environment
+//! pip install -r requirements.txt          # numpy scipy matplotlib maturin pytest
+//!
+//! # 2. Rust binary
+//! cd gubas_rs && cargo build --release
+//! # → gubas_rs/target/release/hou_cpp_final
+//!
+//! # 3. Python extension (for OD use)
+//! maturin develop --release
 //! python -c "import gubas_rs; print('ok')"
-//! ```
-//!
-//! ### Build the standalone Rust binary
-//!
-//! ```bash
-//! cd gubas_rs
-//! cargo build --release
-//! # binary: gubas_rs/target/release/hou_cpp_final
 //! ```
 //!
 //! ---

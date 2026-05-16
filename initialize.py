@@ -3,13 +3,13 @@
 What it does:
   1. Checks that Rust / cargo is installed.
   2. Creates a local Python virtual environment in .venv.
-  3. Installs Python dependencies inside .venv.
+  3. Installs Python dependencies inside .venv  (numpy, scipy, matplotlib, maturin, pytest).
   4. Builds the standalone Rust binary  →  gubas_rs/target/release/hou_cpp_final
-  5. Optionally builds and installs the maturin Python extension  →  import gubas_rs
+  5. [--maturin] Builds and installs the maturin Python extension  →  import gubas_rs
 
 Usage:
-    python initialize.py            # binary only
-    python initialize.py --maturin  # binary + Python extension
+    python initialize.py            # steps 1-4
+    python initialize.py --maturin  # steps 1-5  (recommended for OD / Python use)
 """
 
 import argparse
@@ -103,19 +103,27 @@ def main():
     )
     args = parser.parse_args()
 
+    total = 4 if args.maturin else 3
+    step = 0
+
+    def header(msg):
+        nonlocal step
+        step += 1
+        print(f"\n[{step}/{total}] {msg}")
+
     print("\n=== GUBAS initializer ===\n")
 
-    print("[1/3] Checking for Rust / cargo ...")
+    header("Checking for Rust / cargo ...")
     check_cargo()
 
-    print("\n[2/3] Creating venv and installing Python dependencies ...")
+    header("Creating venv and installing Python dependencies ...")
     py = install_python_deps()
 
-    print("\n[3/3] Building Rust binary (release) ...")
+    header("Building Rust binary (release) ...")
     build_binary()
 
     if args.maturin:
-        print("\n[+] Building maturin Python extension ...")
+        header("Building maturin Python extension ...")
         build_maturin_extension(py)
 
     print("\n=== Done ===")
@@ -125,10 +133,13 @@ def main():
     if args.maturin:
         print("Module:  import gubas_rs")
 
-    print("\nRun the example:")
-    print("  source .venv/bin/activate")
+    print("\nActivate the environment and run the example:")
+    print("  source .venv/bin/activate   # (Windows: .venv\\Scripts\\activate)")
     print("  cd example")
-    print("  python run_example.py\n")
+    print("  python run_example.py")
+    print("\nRun tests:")
+    print("  cd gubas_rs && cargo test   # Rust unit tests (108)")
+    print("  cd ..      && pytest        # Python tests (24)\n")
 
 
 if __name__ == "__main__":
