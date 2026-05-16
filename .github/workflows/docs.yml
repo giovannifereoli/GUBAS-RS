@@ -1,0 +1,33 @@
+name: Deploy rustdoc to GitHub Pages
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:          # allow manual trigger from the Actions tab
+
+permissions:
+  contents: write
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build rustdoc
+        run: cargo doc --no-deps --manifest-path gubas_rs/Cargo.toml
+
+      - name: Add redirect index at root
+        run: |
+          echo '<meta http-equiv="refresh" content="0; url=gubas_rs/index.html">' \
+            > gubas_rs/target/doc/index.html
+
+      - name: Deploy to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: gubas_rs/target/doc
+          force_orphan: true
