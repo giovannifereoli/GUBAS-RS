@@ -11,8 +11,8 @@ Conservation*.csv
 Energy*.csv
 FHamiltonian*.csv
 Hamiltonian*.csv
--r output_t/
--r output_x/
+output_t/
+output_x/
 ic_input.txt
 target/
 .venv/
