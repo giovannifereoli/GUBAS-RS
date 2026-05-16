@@ -1,0 +1,212 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="GUBAS-RS — General Use Binary Asteroid Simulator (Rust)"><title>gubas_rs - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2" crossorigin href="../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../static.files/rustdoc-916cea96.css"><meta name="rustdoc-vars" data-root-path="../" data-static-root-path="../static.files/" data-current-crate="gubas_rs" data-themes="" data-resource-suffix="" data-rustdoc-version="1.87.0 (17067e9ac 2025-05-09)" data-channel="1.87.0" data-search-js="search-e7298875.js" data-settings-js="settings-d72f25bb.js" ><script src="../static.files/storage-82c7156e.js"></script><script defer src="../crates.js"></script><script defer src="../static.files/main-fb8c74a8.js"></script><noscript><link rel="stylesheet" href="../static.files/noscript-893ab5e7.css"></noscript><link rel="alternate icon" type="image/png" href="../static.files/favicon-32x32-6580c154.png"><link rel="icon" type="image/svg+xml" href="../static.files/favicon-044be391.svg"></head><body class="rustdoc mod crate"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="mobile-topbar"><button class="sidebar-menu-toggle" title="show sidebar"></button></nav><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../gubas_rs/index.html">gubas_<wbr>rs</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><ul class="block"><li><a id="all-types" href="all.html">All Items</a></li></ul><section id="rustdoc-toc"><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#gubas-rs--general-use-binary-asteroid-simulator-rust" title="GUBAS-RS — General Use Binary Asteroid Simulator (Rust)">GUBAS-RS — General Use Binary Asteroid Simulator (Rust)</a><ul><li><a href="#statement-of-need" title="Statement of Need">Statement of Need</a></li><li><a href="#installation" title="Installation">Installation</a></li><li><a href="#module-overview" title="Module Overview">Module Overview</a></li><li><a href="#example-usage" title="Example Usage">Example Usage</a></li><li><a href="#automated-tests" title="Automated Tests">Automated Tests</a></li><li><a href="#contributing-and-support" title="Contributing and Support">Contributing and Support</a></li></ul></li></ul><h3><a href="#modules">Crate Items</a></h3><ul class="block"><li><a href="#modules" title="Modules">Modules</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"></div></div></nav><div class="sidebar-resizer"></div><main><div class="width-limiter"><rustdoc-search></rustdoc-search><section id="main-content" class="content"><div class="main-heading"><h1>Crate <span>gubas_rs</span><button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../src/gubas_rs/lib.rs.html#1-1477">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><h2 id="gubas-rs--general-use-binary-asteroid-simulator-rust"><a class="doc-anchor" href="#gubas-rs--general-use-binary-asteroid-simulator-rust">§</a>GUBAS-RS — General Use Binary Asteroid Simulator (Rust)</h2>
+<hr />
+<h3 id="statement-of-need"><a class="doc-anchor" href="#statement-of-need">§</a>Statement of Need</h3>
+<p>Binary asteroid systems — two gravitationally bound rocky bodies — are among
+the most informative objects for planetary science: their mutual orbit encodes
+both masses, while the coupled spin–orbit evolution constrains the internal
+mass distribution of each body.  Modelling this system accurately requires the
+<strong>Full Two-Body Problem (F2BP)</strong>, in which both bodies are treated as extended,
+non-spherical masses with arbitrary gravity fields.</p>
+<p>Existing open tools either approximate one or both bodies as point masses, or
+lack the sensitivity analysis machinery needed for <strong>orbit determination (OD)</strong>
+from spacecraft tracking data.  GUBAS-RS fills this gap by providing:</p>
+<ol>
+<li><strong>High-fidelity F2BP dynamics</strong> — mutual gravitational potential evaluated
+as a Hou 2016 series in inertia integrals T_{ijk}, valid for any body shape.</li>
+<li><strong>Exact State Transition Matrix</strong> — forward-mode automatic differentiation
+(<a href="dual/index.html" title="mod gubas_rs::dual"><code>dual</code></a>) replaces finite differences; no step-size tuning, no truncation error.</li>
+<li><strong>Parameter sensitivity for gravity field estimation</strong> — the augmented STM
+propagates ∂x/∂T_{ijk} simultaneously for <em>both</em> bodies (<a href="stm/index.html" title="mod gubas_rs::stm"><code>stm</code></a>), enabling
+direct use in batch least-squares or Kalman filters.</li>
+<li><strong>Stokes coefficient conversion</strong> — the linear map
+∂x/∂T_{ijk} → ∂x/∂C_{lm}/S_{lm} (<a href="stokes/index.html" title="mod gubas_rs::stokes"><code>stokes</code></a>) delivers partials in the
+spherical harmonic basis used by standard geodesy tools.</li>
+<li><strong>Python interface</strong> — compiled via PyO3/maturin so that any Python OD
+framework can call the Rust core with zero subprocess overhead.</li>
+</ol>
+<h4 id="target-audience"><a class="doc-anchor" href="#target-audience">§</a>Target audience</h4>
+<ul>
+<li><strong>Planetary scientists</strong> modelling binary asteroid dynamics (e.g. Didymos–
+Dimorphos post-DART, binary near-Earth asteroids).</li>
+<li><strong>Astrodynamicists</strong> building OD pipelines that need trajectory + STM from
+a single consistent F2BP model.</li>
+<li><strong>Researchers</strong> studying DART/Hera mission science: gravity field recovery
+from radiometric tracking.</li>
+</ul>
+<hr />
+<h3 id="installation"><a class="doc-anchor" href="#installation">§</a>Installation</h3><h4 id="dependencies"><a class="doc-anchor" href="#dependencies">§</a>Dependencies</h4><div><table><thead><tr><th>Dependency</th><th>Version</th><th>Purpose</th></tr></thead><tbody>
+<tr><td>Rust toolchain</td><td>≥ 1.75</td><td>compile the crate</td></tr>
+<tr><td>Python</td><td>≥ 3.8</td><td>Python interface and test suite</td></tr>
+<tr><td><code>maturin</code></td><td>≥ 1.0</td><td>build the Python extension</td></tr>
+<tr><td><code>numpy</code></td><td>any</td><td>array handling in Python examples</td></tr>
+<tr><td><code>scipy</code></td><td>any</td><td><code>solve_ivp</code> in OD examples</td></tr>
+<tr><td><code>matplotlib</code></td><td>any</td><td>plotting in example scripts</td></tr>
+</tbody></table>
+</div>
+<p>Install Rust via <a href="https://rustup.rs">rustup</a>, then Python dependencies:</p>
+<div class="example-wrap"><pre class="language-bash"><code>pip install maturin numpy scipy matplotlib</code></pre></div><h4 id="build-as-a-python-extension-recommended-for-od-use"><a class="doc-anchor" href="#build-as-a-python-extension-recommended-for-od-use">§</a>Build as a Python extension (recommended for OD use)</h4><div class="example-wrap"><pre class="language-bash"><code>python -m venv .venv &amp;&amp; source .venv/bin/activate
+cd gubas_rs
+maturin develop --release   # installs gubas_rs into the active environment
+python -c &quot;import gubas_rs; print(&#39;ok&#39;)&quot;</code></pre></div><h4 id="build-the-standalone-rust-binary"><a class="doc-anchor" href="#build-the-standalone-rust-binary">§</a>Build the standalone Rust binary</h4><div class="example-wrap"><pre class="language-bash"><code>cd gubas_rs
+cargo build --release
+# binary: gubas_rs/target/release/hou_cpp_final</code></pre></div>
+<hr />
+<h3 id="module-overview"><a class="doc-anchor" href="#module-overview">§</a>Module Overview</h3><div><table><thead><tr><th>Module</th><th>Role</th></tr></thead><tbody>
+<tr><td><a href="dynamics/index.html" title="mod gubas_rs::dynamics"><code>dynamics</code></a></td><td>F2BP ODE right-hand side (<code>hou_ode</code>) — 30-element state</td></tr>
+<tr><td><a href="integrators/index.html" title="mod gubas_rs::integrators"><code>integrators</code></a></td><td>RK4, Adams-Bashforth-Moulton, adaptive RK7(8), LGVI</td></tr>
+<tr><td><a href="stm/index.html" title="mod gubas_rs::stm"><code>stm</code></a></td><td>STM and augmented-STM propagators (∂x/∂x₀ and ∂x/∂θ)</td></tr>
+<tr><td><a href="stokes/index.html" title="mod gubas_rs::stokes"><code>stokes</code></a></td><td>N_{ijk} → C_{lm}/S_{lm} Stokes matrix (Tricarico 2008)</td></tr>
+<tr><td><a href="potential/index.html" title="mod gubas_rs::potential"><code>potential</code></a></td><td>Mutual gravitational potential and all partial derivatives</td></tr>
+<tr><td><a href="coefficients/index.html" title="mod gubas_rs::coefficients"><code>coefficients</code></a></td><td>Hou 2016 expansion coefficients (t_k, a_k, b_k)</td></tr>
+<tr><td><a href="inertia/index.html" title="mod gubas_rs::inertia"><code>inertia</code></a></td><td>Inertia integrals T_{ijk} from ellipsoid or polyhedron</td></tr>
+<tr><td><a href="orbit/index.html" title="mod gubas_rs::orbit"><code>orbit</code></a></td><td>Kepler’s equation solver (elliptic + hyperbolic), elements → Cartesian</td></tr>
+<tr><td><a href="dual/index.html" title="mod gubas_rs::dual"><code>dual</code></a></td><td>Forward-mode dual number: <code>Dual = a + bε</code>, ε² = 0</td></tr>
+<tr><td><a href="math3/index.html" title="mod gubas_rs::math3"><code>math3</code></a></td><td>3-vector / 3×3-matrix primitives (<code>cross</code>, <code>inv</code>, <code>tilde</code>, …)</td></tr>
+<tr><td><a href="types/index.html" title="mod gubas_rs::types"><code>types</code></a></td><td><code>Cube&lt;T&gt;</code>, <code>Params&lt;T&gt;</code> — generic simulation data structures</td></tr>
+</tbody></table>
+</div>
+<p>Every public function is documented with its arguments, return value, units,
+and mathematical background.  See the sidebar for the full API reference.</p>
+<hr />
+<h3 id="example-usage"><a class="doc-anchor" href="#example-usage">§</a>Example Usage</h3><h4 id="minimal-rust-example--one-rk4-step-with-point-masses"><a class="doc-anchor" href="#minimal-rust-example--one-rk4-step-with-point-masses">§</a>Minimal Rust example — one RK4 step with point masses</h4>
+<p>All physical units are <strong>km / kg / s</strong>.</p>
+
+<div class="example-wrap ignore"><a href="#" class="tooltip" title="This example is not tested">ⓘ</a><pre class="rust rust-example-rendered"><code><span class="kw">use </span>gubas_rs::{
+    coefficients::{a_calc, b_calc, tk_calc},
+    integrators::rk4_stack,
+    types::{Cube, Params},
+};
+
+<span class="comment">// Body masses (Didymos system, kg)
+</span><span class="kw">let </span>ma: f64 = <span class="number">5.32e11</span>;
+<span class="kw">let </span>mb: f64 = <span class="number">4.94e9</span>;
+<span class="kw">let </span>g:  f64 = <span class="number">6.674e-20</span>; <span class="comment">// km³/(kg·s²)
+
+// Zeroth-order expansion: point masses
+</span><span class="kw">let </span>n = <span class="number">0usize</span>;
+<span class="kw">let </span><span class="kw-2">mut </span>ta = Cube::new(n);  ta.set(<span class="number">0</span>, <span class="number">0</span>, <span class="number">0</span>, ma);
+<span class="kw">let </span><span class="kw-2">mut </span>tb = Cube::new(n);  tb.set(<span class="number">0</span>, <span class="number">0</span>, <span class="number">0</span>, mb);
+
+<span class="kw">let </span><span class="kw-2">mut </span>params = Params {
+    g, m: ma * mb / (ma + mb), nu: mb / (ma + mb),
+    ta, tb,
+    ia: [<span class="number">3.01e19</span>, <span class="number">3.01e19</span>, <span class="number">3.01e19</span>], <span class="comment">// primary MOI (kg·km²)
+    </span>ib: [<span class="number">5.0e16</span>,  <span class="number">5.0e16</span>,  <span class="number">5.0e16</span>],  <span class="comment">// secondary MOI
+    </span>n, tk: tk_calc(n), a: a_calc(n), b: b_calc(n),
+    flyby_toggle: <span class="number">0</span>, helio_toggle: <span class="number">0</span>, sg_toggle: <span class="number">0</span>, tt_toggle: <span class="number">0</span>,
+};
+params.compute_lgvi_inertia();
+
+<span class="comment">// Circular orbit initial state: r = [1.19 km, 0, 0], Cc = C = I₃
+</span><span class="kw">let </span>a_orb = <span class="number">1.19_f64</span>;
+<span class="kw">let </span>v_c   = (g * (ma + mb) / a_orb).sqrt();
+<span class="kw">let </span>eye   = [<span class="number">1.0_f64</span>, <span class="number">0.0</span>, <span class="number">0.0</span>, <span class="number">0.0</span>, <span class="number">1.0</span>, <span class="number">0.0</span>, <span class="number">0.0</span>, <span class="number">0.0</span>, <span class="number">1.0</span>];
+<span class="kw">let </span>x0: [f64; <span class="number">30</span>] = [
+    a_orb, <span class="number">0.0</span>, <span class="number">0.0</span>,  <span class="number">0.0</span>, v_c, <span class="number">0.0</span>,       <span class="comment">// r (km), v (km/s)
+    </span><span class="number">0.0</span>, <span class="number">0.0</span>, <span class="number">0.0</span>,    <span class="number">0.0</span>, <span class="number">0.0</span>, <span class="number">0.0</span>,        <span class="comment">// ωc, ωs (rad/s)
+    </span>eye[<span class="number">0</span>], eye[<span class="number">1</span>], eye[<span class="number">2</span>], eye[<span class="number">3</span>], eye[<span class="number">4</span>],
+    eye[<span class="number">5</span>], eye[<span class="number">6</span>], eye[<span class="number">7</span>], eye[<span class="number">8</span>],          <span class="comment">// Cc (row-major)
+    </span>eye[<span class="number">0</span>], eye[<span class="number">1</span>], eye[<span class="number">2</span>], eye[<span class="number">3</span>], eye[<span class="number">4</span>],
+    eye[<span class="number">5</span>], eye[<span class="number">6</span>], eye[<span class="number">7</span>], eye[<span class="number">8</span>],          <span class="comment">// C  (row-major)
+</span>];
+
+<span class="comment">// Integrate 100 s at h = 1 s — writes output_t/ and output_x/
+</span>rk4_stack(<span class="number">0.0</span>, <span class="number">100.0</span>, x0, <span class="number">1.0</span>, <span class="kw-2">&amp;</span>params);</code></pre></div>
+<h4 id="full-od-pipeline-in-python"><a class="doc-anchor" href="#full-od-pipeline-in-python">§</a>Full OD pipeline in Python</h4>
+<p>After building the extension with <code>maturin develop --release</code>:</p>
+<div class="example-wrap"><pre class="language-python"><code>import gubas_rs, numpy as np
+from stokes_utils import convert_phi_xt_to_cs, cs_labels
+import os; os.chdir(&quot;example/&quot;)  # ic_input.txt must be in cwd
+
+# 1. Build the augmented model (degree-2 gravity for both bodies)
+model = gubas_rs.AugmentedDynamicsModel(
+    min_degree_a=2, max_degree_a=2,
+    min_degree_b=2, max_degree_b=2,
+)
+N_AUG = model.n_aug      # 30 + N_a + N_b  (e.g. 42 for deg-2 both)
+theta0 = np.array(model.theta_nominal)
+idx_a  = model.theta_indices_a  # list of (i,j,k) for primary T_{ijk}
+idx_b  = model.theta_indices_b
+
+# 2. Build augmented initial conditions
+x0  = ...  # 30-element state (km, km/s, rad/s, rotation matrices)
+z0  = np.concatenate([x0, theta0])
+y0  = np.concatenate([z0, np.eye(N_AUG).ravel()])   # state + Φ_aug
+
+# 3. Propagate with scipy (uses exact AD Jacobian internally)
+from scipy.integrate import solve_ivp
+sol = solve_ivp(
+    lambda t, y: np.array(model.eval_stm(y.tolist(), t)),
+    [0.0, 7200.0], y0, method=&quot;DOP853&quot;,
+    rtol=1e-10, atol=1e-13,
+)
+phi_aug = sol.y.T[:, N_AUG:].reshape(-1, N_AUG, N_AUG)
+
+# 4. Convert inertia-integral partials to spherical harmonic C/S partials
+phi_xta = phi_aug[:, :30, 30:30+model.n_theta_a]
+phi_xcs_a, _, _ = convert_phi_xt_to_cs(phi_xta, idx_a, 2, 2)
+# phi_xcs_a[k]: (30, 5) — ∂x(tₖ)/∂[C20,C21,S21,C22,S22] primary</code></pre></div>
+<p>More complete examples are in <code>example/</code>:</p>
+<div><table><thead><tr><th>Script</th><th>Demonstrates</th></tr></thead><tbody>
+<tr><td><code>run_example.py</code></td><td>Trajectory, energy and angular momentum conservation</td></tr>
+<tr><td><code>run_example_OD.py</code></td><td>STM propagation, <code>DynamicsModel.eval</code></td></tr>
+<tr><td><code>run_example_OD_stokes.py</code></td><td>Single-body C/S partials</td></tr>
+<tr><td><code>run_example_OD_stokes_2.py</code></td><td><strong>Both-body C/S partials</strong>, validation vs Rust reference</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h3 id="automated-tests"><a class="doc-anchor" href="#automated-tests">§</a>Automated Tests</h3>
+<p>The test suite verifies every module against analytic reference values —
+no floating-point tolerances are loosened beyond what the physics demands.</p>
+<h4 id="rust-tests--108-tests-across-all-11-modules"><a class="doc-anchor" href="#rust-tests--108-tests-across-all-11-modules">§</a>Rust tests — 108 tests across all 11 modules</h4><div class="example-wrap"><pre class="language-bash"><code>cd gubas_rs
+cargo test</code></pre></div>
+<p>Expected:</p>
+<div class="example-wrap"><pre class="language-text"><code>running 108 tests
+test coefficients::tests::a_calc_n0_monopole ... ok
+...
+test result: ok. 108 passed; 0 failed; 0 ignored</code></pre></div>
+<p>Filter by module or test name:</p>
+<div class="example-wrap"><pre class="language-bash"><code>cargo test potential::     # only potential module
+cargo test oblate_c20      # any test whose name contains &quot;oblate_c20&quot;</code></pre></div>
+<p>Key analytic checks performed:</p>
+<div><table><thead><tr><th>Module</th><th>Representative checks</th></tr></thead><tbody>
+<tr><td><a href="dual/index.html" title="mod gubas_rs::dual"><code>dual</code></a></td><td>sin′ = cos, chain rule, powi at zero</td></tr>
+<tr><td><a href="math3/index.html" title="mod gubas_rs::math3"><code>math3</code></a></td><td>i×j = k, det(I) = 1, inv · self = I</td></tr>
+<tr><td><a href="stokes/index.html" title="mod gubas_rs::stokes"><code>stokes</code></a></td><td>sphere C₂ₘ = 0; oblate C₂₀ = −3/5; triaxial C₂₂ = 3</td></tr>
+<tr><td><a href="potential/index.html" title="mod gubas_rs::potential"><code>potential</code></a></td><td>order-0 recovers −G·M₁M₂/r and G·M₁M₂/r² force</td></tr>
+<tr><td><a href="dynamics/index.html" title="mod gubas_rs::dynamics"><code>dynamics</code></a></td><td>centripetal acceleration = −G(M₁+M₂)/a²; zero torques for n=0</td></tr>
+<tr><td><a href="orbit/index.html" title="mod gubas_rs::orbit"><code>orbit</code></a></td><td>vis-viva ½v² = μ/(2a); r·v = 0 at periapsis</td></tr>
+<tr><td><a href="integrators/index.html" title="mod gubas_rs::integrators"><code>integrators</code></a></td><td>all four integrators produce non-NaN output of correct size</td></tr>
+</tbody></table>
+</div><h4 id="python-tests--24-tests-no-rust-extension-needed"><a class="doc-anchor" href="#python-tests--24-tests-no-rust-extension-needed">§</a>Python tests — 24 tests (no Rust extension needed)</h4><div class="example-wrap"><pre class="language-bash"><code># from the repo root
+python3 -m pytest</code></pre></div>
+<p>Expected:</p>
+<div class="example-wrap"><pre class="language-text"><code>collected 24 items
+tests/test_stokes_utils.py::TestCsLabels::test_count_degree2 PASSED
+...
+24 passed in 1.3s</code></pre></div>
+<p>Filter by class or keyword:</p>
+<div class="example-wrap"><pre class="language-bash"><code>python3 -m pytest -k &quot;TestStokesMatrix&quot;
+python3 -m pytest -k &quot;oblate_c20&quot;</code></pre></div>
+<p><code>tests/conftest.py</code> adds <code>example/</code> to <code>sys.path</code> automatically — no
+manual path setup is required.</p>
+<h4 id="rebuild-and-view-the-html-documentation"><a class="doc-anchor" href="#rebuild-and-view-the-html-documentation">§</a>Rebuild and view the HTML documentation</h4><div class="example-wrap"><pre class="language-bash"><code>cd gubas_rs
+cargo doc --no-deps --open
+# opens: gubas_rs/target/doc/gubas_rs/index.html</code></pre></div>
+<hr />
+<h3 id="contributing-and-support"><a class="doc-anchor" href="#contributing-and-support">§</a>Contributing and Support</h3>
+<p>See <a href="https://github.com/giovannifereoli/GUBAS-RS/blob/master/CONTRIBUTING.md"><code>CONTRIBUTING.md</code></a>
+in the repository root for full guidelines.  In brief:</p>
+<ul>
+<li><strong>Bug reports</strong> — open a GitHub Issue with a minimal reproducible example.</li>
+<li><strong>Feature requests</strong> — open an Issue describing the use-case.</li>
+<li><strong>Pull requests</strong> — fork the repo, create a branch, add tests for any new
+code, run <code>cargo test</code> and <code>python3 -m pytest</code>, then open a PR against
+<code>master</code>.</li>
+<li><strong>Questions / support</strong> — open a GitHub Discussion or contact the
+maintainer at <code>giovafere@gmail.com</code>.</li>
+</ul>
+</div></details><h2 id="modules" class="section-header">Modules<a href="#modules" class="anchor">§</a></h2><dl class="item-table"><dt><a class="mod" href="coefficients/index.html" title="mod gubas_rs::coefficients">coefficients</a></dt><dd>Expansion coefficients for the Hou 2016 mutual gravitational potential.</dd><dt><a class="mod" href="dual/index.html" title="mod gubas_rs::dual">dual</a></dt><dt><a class="mod" href="dynamics/index.html" title="mod gubas_rs::dynamics">dynamics</a></dt><dd>Full Two-Body Problem (F2BP) equations of motion.</dd><dt><a class="mod" href="inertia/index.html" title="mod gubas_rs::inertia">inertia</a></dt><dt><a class="mod" href="integrators/index.html" title="mod gubas_rs::integrators">integrators</a></dt><dd>Fixed-step RK4 / ABM, adaptive RK7(8), and LGVI integrators.</dd><dt><a class="mod" href="lgvi/index.html" title="mod gubas_rs::lgvi">lgvi</a></dt><dd>Lie Group Variational Integrator (LGVI) helpers (Lee 2007).</dd><dt><a class="mod" href="math3/index.html" title="mod gubas_rs::math3">math3</a></dt><dt><a class="mod" href="orbit/index.html" title="mod gubas_rs::orbit">orbit</a></dt><dd>Keplerian orbit utilities: Kepler’s equation solver and element-to-Cartesian conversion.</dd><dt><a class="mod" href="potential/index.html" title="mod gubas_rs::potential">potential</a></dt><dd>Mutual gravitational potential and its partial derivatives (Hou 2016).</dd><dt><a class="mod" href="stm/index.html" title="mod gubas_rs::stm">stm</a></dt><dt><a class="mod" href="stokes/index.html" title="mod gubas_rs::stokes">stokes</a></dt><dt><a class="mod" href="types/index.html" title="mod gubas_rs::types">types</a></dt><dd>Shared data structures: <a href="types/struct.Cube.html" title="struct gubas_rs::types::Cube"><code>Cube</code></a>, <a href="types/struct.Params.html" title="struct gubas_rs::types::Params"><code>Params</code></a>, and <a href="types/struct.Initialization.html" title="struct gubas_rs::types::Initialization"><code>Initialization</code></a>.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.ic_read.html" title="fn gubas_rs::ic_read">ic_read</a></dt><dt><a class="fn" href="fn.run_simulation.html" title="fn gubas_rs::run_simulation">run_<wbr>simulation</a></dt><dd>Run a full GUBAS simulation. Reads <code>ic_input.txt</code> from the current working
+directory and writes binary output to <code>output_t/t_out.bin</code> and
+<code>output_x/x_out.bin</code> in the same directory.</dd><dt><a class="fn" href="fn.run_stm.html" title="fn gubas_rs::run_stm">run_stm</a></dt><dd>Propagate the STM alongside the trajectory using forward-mode AD Jacobians.</dd><dt><a class="fn" href="fn.run_stm_augmented.html" title="fn gubas_rs::run_stm_augmented">run_<wbr>stm_<wbr>augmented</a></dt><dd>Propagate trajectory + STM (Φ_xx) + inertia-parameter sensitivity (Φ_xθ).</dd><dt><a class="fn" href="fn.run_stm_augmented_both.html" title="fn gubas_rs::run_stm_augmented_both">run_<wbr>stm_<wbr>augmented_<wbr>both</a></dt><dd>Same as <code>run_stm_augmented</code> but estimates inertia integrals for <strong>both</strong> bodies
+simultaneously.  The augmented state is z = [x(30); θ_a(N_a); θ_b(N_b)].</dd></dl></section></div></main></body></html>

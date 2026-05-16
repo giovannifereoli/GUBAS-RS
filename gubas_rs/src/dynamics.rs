@@ -1,16 +1,18 @@
-// dynamics.rs — Equations of motion and perturbation forces
-//
-// The ODE used by RK4, RK7/8, and ABM integrators.
-// State vector layout (30 elements, A-frame):
-//   [0..2]  r     relative position (km)
-//   [3..5]  v     relative velocity (km/s)
-//   [6..8]  wc    primary angular velocity (rad/s)
-//   [9..11] ws    secondary angular velocity in A frame (rad/s)
-//   [12..20] Cc   inertial-to-A rotation matrix, row-major
-//   [21..29] C    B-to-A rotation matrix, row-major
-//
-// All functions are generic over `Scalar` (defaults to f64) so that dual-number
-// types can flow through for auto-differentiation (STM / parameter sensitivity).
+//! Full Two-Body Problem (F2BP) equations of motion.
+//!
+//! Provides `hou_ode` — the continuous ODE right-hand side used by all
+//! non-symplectic integrators (RK4, RK7/8, ABM).  Generic over [`Scalar`] so
+//! `Dual` types can propagate for auto-differentiation.
+//!
+//! # State vector (30 elements, A frame)
+//! | Range | Quantity | Units |
+//! |---|---|---|
+//! | 0–2   | r   — relative position            | km     |
+//! | 3–5   | v   — relative velocity            | km/s   |
+//! | 6–8   | ωc  — primary angular velocity     | rad/s  |
+//! | 9–11  | ωs  — secondary ang. vel. (A frame)| rad/s  |
+//! | 12–20 | Cc  — inertial-to-A, row-major     | —      |
+//! | 21–29 | C   — B-to-A, row-major            | —      |
 
 use crate::inertia::{dt_dc, inertia_rot};
 use crate::math3::*;
@@ -311,4 +313,104 @@ pub fn hou_ode<T: Scalar>(x: [T; 30], time: f64, p: &Params<T>) -> [T; 30] {
      cd[0][0],  cd[0][1],  cd[0][2],
      cd[1][0],  cd[1][1],  cd[1][2],
      cd[2][0],  cd[2][1],  cd[2][2]]
+}
+
+// ── tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::hou_ode;
+    use crate::coefficients::{a_calc, b_calc, tk_calc};
+    use crate::types::{Cube, Params};
+
+    /// Minimal Params for monopole (n=0) with all perturbations disabled.
+    fn point_mass_params(ma: f64, mb: f64) -> Params {
+        let g     = 6.674e-20_f64;
+        let m_red = ma * mb / (ma + mb);
+        let nu    = mb / (ma + mb);
+        let n     = 0_usize;
+        let mut ta = Cube::new(n);  ta.set(0, 0, 0, ma);
+        let mut tb = Cube::new(n);  tb.set(0, 0, 0, mb);
+        let mut p = Params {
+            g, m: m_red, nu,
+            ta, tb,
+            ia: [1.0, 1.0, 1.0],
+            ib: [1.0, 1.0, 1.0],
+            n, tk: tk_calc(n), a: a_calc(n), b: b_calc(n),
+            flyby_toggle: 0, helio_toggle: 0, sg_toggle: 0, tt_toggle: 0,
+            mplanet: 0.0,
+            a_hyp: -1.0, e_hyp: 1.5, i_hyp: 0.0, raan_hyp: 0.0,
+            om_hyp: 0.0, tau_hyp: 0.0, n_hyp: 0.0,
+            msolar: 0.0,
+            a_helio: 1.0, e_helio: 0.0, i_helio: 0.0, raan_helio: 0.0,
+            om_helio: 0.0, tau_helio: 0.0, n_helio: 0.0,
+            sol_rad: 0.0, au_def: 1.496e8, mean_motion: 0.0,
+            love1: 0.0, love2: 0.0, refrad1: 1.0, refrad2: 1.0,
+            rho_a: 1e12, rho_b: 1e12, eps1: 0.0, eps2: 0.0,
+            ida: [[0.0; 3]; 3],
+            idb: [[0.0; 3]; 3],
+            msun: 2e30,
+        };
+        p.compute_lgvi_inertia();
+        p
+    }
+
+    /// Build state with r=[a,0,0], v=[0,v,0], wc=ws=0, Cc=C=I
+    fn circular_state(a: f64, v: f64) -> [f64; 30] {
+        let i = [1.0, 0.0, 0.0,  0.0, 1.0, 0.0,  0.0, 0.0, 1.0]; // row-major I₃
+        [a, 0.0, 0.0,
+         0.0, v, 0.0,
+         0.0, 0.0, 0.0,   // wc
+         0.0, 0.0, 0.0,   // ws
+         i[0], i[1], i[2], i[3], i[4], i[5], i[6], i[7], i[8],  // Cc
+         i[0], i[1], i[2], i[3], i[4], i[5], i[6], i[7], i[8]]  // C
+    }
+
+    #[test]
+    fn hou_ode_point_mass_centripetal_force() {
+        // r=[a,0,0], wc=0 → rd = v, vd[0] = −G(Ma+Mb)/a²
+        let ma = 5.0e11_f64;
+        let mb = 2.0e11_f64;
+        let g  = 6.674e-20_f64;
+        let a  = 10.0_f64;
+        let mu = g * (ma + mb);
+        let v  = (mu / a).sqrt();
+        let p  = point_mass_params(ma, mb);
+        let xd = hou_ode(circular_state(a, v), 0.0, &p);
+
+        // rd = [0, v, 0]  (no rotating frame: wc = 0)
+        assert!((xd[0]).abs() < 1e-12, "rd_x ≠ 0: {}", xd[0]);
+        assert!((xd[1] - v).abs() < 1e-10, "rd_y ≠ v_circ: {}", xd[1]);
+
+        // vd[0] = −G(Ma+Mb)/a²  (centripetal, inward)
+        let expected = -mu / (a * a);
+        assert!((xd[3] - expected).abs() / expected.abs() < 1e-10,
+                "vd_x expected {expected:.6e}, got {:.6e}", xd[3]);
+
+        // vd[1] = 0 (no tangential force for aligned monopole)
+        assert!(xd[4].abs() < 1e-30, "vd_y ≠ 0: {:.6e}", xd[4]);
+    }
+
+    #[test]
+    fn hou_ode_point_mass_no_torques() {
+        // n=0 expansion: du/dC = 0 → wċ = wṡ = Ċc = Ċ = 0
+        let ma = 5.0e11_f64;
+        let mb = 2.0e11_f64;
+        let g  = 6.674e-20_f64;
+        let a  = 10.0_f64;
+        let v  = (g * (ma + mb) / a).sqrt();
+        let p  = point_mass_params(ma, mb);
+        let xd = hou_ode(circular_state(a, v), 0.0, &p);
+
+        // indices 6..12 are angular velocity derivatives (should all be 0)
+        for i in 6..12 {
+            assert!(xd[i].abs() < 1e-30,
+                    "xd[{i}] = {:.6e} should be 0 (no torques for n=0)", xd[i]);
+        }
+        // indices 12..30 are rotation-matrix derivatives (should all be 0)
+        for i in 12..30 {
+            assert!(xd[i].abs() < 1e-30,
+                    "xd[{i}] = {:.6e} should be 0 (wc = ws = 0)", xd[i]);
+        }
+    }
 }

@@ -1,6 +1,7 @@
-// orbit.rs — Keplerian orbit utilities
-//
-// Mirrors `double kepler(...)` and `vec kepler2cart(...)` from the C++ code.
+//! Keplerian orbit utilities: Kepler's equation solver and element-to-Cartesian conversion.
+//!
+//! Handles elliptic (`e < 1`) and hyperbolic (`e > 1`) orbits via Newton's method.
+//! Used by the ODE and integrators when flyby or heliocentric perturbations are active.
 
 use crate::math3::{add_v, cross, scale_v};
 
@@ -94,4 +95,94 @@ pub fn kepler2cart(a: f64, ecc: f64, inc: f64, raan: f64, om: f64,
     let v_vec = scale_v(v_mag, add_v(scale_v(sin_gamma, r_hat), scale_v(cos_gamma, r_perp)));
 
     [r_vec[0], r_vec[1], r_vec[2], v_vec[0], v_vec[1], v_vec[2]]
+}
+
+// ── tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn close(a: f64, b: f64, tol: f64) {
+        assert!((a - b).abs() < tol, "expected {b:.6e}, got {a:.6e}");
+    }
+
+    // Earth-like gravitational parameter for dimensioned tests
+    const MU: f64 = 398_600.4418_f64; // km³/s²
+    const G: f64  = 6.674e-20_f64;    // km³/(kg·s²)
+    const MB: f64 = MU / G;
+
+    // ── kepler ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn kepler_elliptic_at_periapsis() {
+        // t = tau → M = 0 → E = 0 → f = 0
+        let f = kepler(0.001, 0.0, 0.5, 0.0);
+        close(f, 0.0, 0.01);
+    }
+
+    #[test]
+    fn kepler_circular_quarter_period() {
+        // Circular (ecc=0) at t = T/4: M = π/2 → f = π/2
+        let n_motion = 2.0 * std::f64::consts::PI;
+        let f = kepler(n_motion, 0.25, 0.0, 0.0);
+        close(f, std::f64::consts::FRAC_PI_2, 0.01);
+    }
+
+    #[test]
+    fn kepler_circular_half_period() {
+        // At t = T/2: M = π → f = π
+        let n_motion = 2.0 * std::f64::consts::PI;
+        let f = kepler(n_motion, 0.5, 0.0, 0.0);
+        close(f, std::f64::consts::PI, 0.01);
+    }
+
+    // ── kepler2cart ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn kepler2cart_circular_radius() {
+        // |r| = a for circular orbit
+        let a = 10.0_f64;
+        let s = kepler2cart(a, 0.0, 0.0, 0.0, 0.0, 0.0, G, MB);
+        let r = (s[0]*s[0] + s[1]*s[1] + s[2]*s[2]).sqrt();
+        close(r, a, 1e-10);
+    }
+
+    #[test]
+    fn kepler2cart_circular_r_dot_v_zero() {
+        // Velocity is perpendicular to position for circular orbit
+        let a = 10.0_f64;
+        let s = kepler2cart(a, 0.0, 0.0, 0.0, 0.0, 0.0, G, MB);
+        let rdotv = s[0]*s[3] + s[1]*s[4] + s[2]*s[5];
+        close(rdotv, 0.0, 1e-10);
+    }
+
+    #[test]
+    fn kepler2cart_circular_vis_viva() {
+        // |v|² = μ/a for circular orbit
+        let a = 10.0_f64;
+        let s = kepler2cart(a, 0.0, 0.0, 0.0, 0.0, 0.0, G, MB);
+        let v2 = s[3]*s[3] + s[4]*s[4] + s[5]*s[5];
+        close(v2, MU / a, 1e-6);
+    }
+
+    #[test]
+    fn kepler2cart_periapsis_radius() {
+        // At f0=0: |r| = a*(1−e)
+        let a = 20.0_f64;
+        let e = 0.5_f64;
+        let s = kepler2cart(a, e, 0.0, 0.0, 0.0, 0.0, G, MB);
+        let r = (s[0]*s[0] + s[1]*s[1] + s[2]*s[2]).sqrt();
+        close(r, a * (1.0 - e), 1e-10);
+    }
+
+    #[test]
+    fn kepler2cart_periapsis_r_dot_v_zero() {
+        // Velocity perpendicular to position at periapsis
+        let a = 20.0_f64;
+        let e = 0.5_f64;
+        let s = kepler2cart(a, e, 0.0, 0.0, 0.0, 0.0, G, MB);
+        let rdotv = s[0]*s[3] + s[1]*s[4] + s[2]*s[5];
+        close(rdotv, 0.0, 1e-9);
+    }
 }

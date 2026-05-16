@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["promote_params"],"struct":["Cube","Initialization","Params"]};

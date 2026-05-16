@@ -1,17 +1,18 @@
-// integrators.rs — Fixed-step RK4, ABM, adaptive RK7(8), and LGVI integrators
-//
-// Each integrator writes raw f64 binary to:
-//   output_t/t_out.bin  — times (one f64 per step)
-//   output_x/x_out.bin  — states (30 f64s per step, row-major)
-//
-// RK4 and ABM also write perturber positions when the flyby/heliocentric
-// toggles are active:
-//   output_h/h_out.bin    — flyby body  [rx,ry,rz,vx,vy,vz] per step
-//   output_sun/sun_out.bin — solar body [rx,ry,rz,vx,vy,vz] per step
-//
-// File format is identical to the C++ Armadillo binary output:
-// native-endian doubles, states stored row-by-row with the initial
-// state always included as the first record.
+//! Fixed-step RK4 / ABM, adaptive RK7(8), and LGVI integrators.
+//!
+//! Each integrator writes native-endian `f64` binary files:
+//! - `output_t/t_out.bin`    — one `f64` per step (time)
+//! - `output_x/x_out.bin`    — 30 `f64`s per step (state, row-major)
+//!
+//! RK4 and ABM also write perturber positions when the flyby / heliocentric
+//! toggles are active (`output_h/` and `output_sun/`).
+//!
+//! | Function | Method | Step control | Notes |
+//! |---|---|---|---|
+//! | [`rk4_stack`] | Classical RK4 | fixed | 4 ODE evaluations/step |
+//! | [`abm`] | Adams-Bashforth-Moulton 4th order | fixed | 3-step RK4 bootstrap |
+//! | [`rk87`] | Dormand-Prince 7(8) | adaptive | inf-norm error control |
+//! | [`lgvi_integ`] | Lie Group Variational Integrator | fixed | SO(3)-preserving |
 
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
@@ -355,5 +356,174 @@ pub fn lgvi_integ(t0: f64, tf: f64, x0: [f64; 30], h: f64, params: &Params) {
         t      += h;
 
         wt(&mut tf_, t);  wx(&mut xf, &x);
+    }
+}
+
+// ── tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::coefficients::{a_calc, b_calc, tk_calc};
+    use crate::types::{Cube, Params};
+    use std::fs;
+    use std::io::Read;
+    use std::sync::Mutex;
+
+    // All four integrators write to the same output_t / output_x directories.
+    // This mutex ensures the tests do not clobber each other when run in parallel.
+    static INTEG_LOCK: Mutex<()> = Mutex::new(());
+
+    // ── shared test fixtures ──────────────────────────────────────────────────
+
+    fn monopole_params(ma: f64, mb: f64) -> Params {
+        let g = 6.674e-20_f64;
+        let n = 0usize;
+        let mut ta = Cube::new(n);  ta.set(0, 0, 0, ma);
+        let mut tb = Cube::new(n);  tb.set(0, 0, 0, mb);
+        let mut p = Params {
+            g, m: ma*mb/(ma+mb), nu: mb/(ma+mb),
+            ta, tb,
+            ia: [1.0, 1.0, 1.0], ib: [1.0, 1.0, 1.0],
+            n, tk: tk_calc(n), a: a_calc(n), b: b_calc(n),
+            flyby_toggle: 0, helio_toggle: 0, sg_toggle: 0, tt_toggle: 0,
+            mplanet: 0.0, a_hyp: -1.0, e_hyp: 1.5,
+            i_hyp: 0.0, raan_hyp: 0.0, om_hyp: 0.0, tau_hyp: 0.0, n_hyp: 0.0,
+            msolar: 0.0, a_helio: 1.0, e_helio: 0.0,
+            i_helio: 0.0, raan_helio: 0.0, om_helio: 0.0, tau_helio: 0.0, n_helio: 0.0,
+            sol_rad: 0.0, au_def: 1.496e8, mean_motion: 0.0,
+            love1: 0.0, love2: 0.0, refrad1: 1.0, refrad2: 1.0,
+            rho_a: 1e12, rho_b: 1e12, eps1: 0.0, eps2: 0.0,
+            ida: [[0.0; 3]; 3], idb: [[0.0; 3]; 3],
+            msun: 2e30,
+        };
+        p.compute_lgvi_inertia();
+        p
+    }
+
+    fn circular_state(a: f64, v: f64) -> [f64; 30] {
+        let e = [1.0_f64, 0.0, 0.0,  0.0, 1.0, 0.0,  0.0, 0.0, 1.0]; // row-major I₃
+        [a, 0.0, 0.0,  0.0, v, 0.0,
+         0.0, 0.0, 0.0,  0.0, 0.0, 0.0,
+         e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7], e[8],
+         e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7], e[8]]
+    }
+
+    /// Read every f64 from a binary file (native-endian).
+    fn read_f64s(path: &str) -> Vec<f64> {
+        let mut bytes = Vec::new();
+        fs::File::open(path).unwrap().read_to_end(&mut bytes).unwrap();
+        bytes.chunks_exact(8)
+             .map(|c| f64::from_ne_bytes(c.try_into().unwrap()))
+             .collect()
+    }
+
+    fn cleanup() {
+        for dir in &["output_t", "output_x", "output_h", "output_sun"] {
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
+
+    // ── RK4 ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn rk4_one_step_file_size_and_non_nan() {
+        let _g = INTEG_LOCK.lock().unwrap();
+        let ma = 5e11_f64;
+        let mb = 2e11_f64;
+        let g  = 6.674e-20_f64;
+        let a  = 10.0_f64;
+        let v  = (g * (ma + mb) / a).sqrt();
+        let h  = 1.0_f64;
+
+        rk4_stack(0.0, h, circular_state(a, v), h, &monopole_params(ma, mb));
+
+        let times  = read_f64s("output_t/t_out.bin");
+        let states = read_f64s("output_x/x_out.bin");
+
+        // Initial record + 1 step → 2 records
+        assert_eq!(times.len(), 2, "expected 2 time records");
+        assert_eq!(states.len(), 2 * 30, "expected 60 state values");
+        assert!((times[0]).abs() < 1e-14);
+        assert!((times[1] - h).abs() < 1e-14);
+        for &val in &states { assert!(!val.is_nan(), "NaN in state"); }
+        // Orbit moves in +y: r_y of second record should be positive
+        assert!(states[30 + 1] > 0.0, "r_y should be positive after 1 step");
+
+        cleanup();
+    }
+
+    // ── ABM ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn abm_four_steps_file_size_and_non_nan() {
+        let _g = INTEG_LOCK.lock().unwrap();
+        let ma = 5e11_f64;
+        let mb = 2e11_f64;
+        let g  = 6.674e-20_f64;
+        let a  = 10.0_f64;
+        let v  = (g * (ma + mb) / a).sqrt();
+        let h  = 1.0_f64;
+
+        // 3-step bootstrap + 1 ABM step = 4 steps, 5 records
+        abm(0.0, 4.0 * h, circular_state(a, v), h, &monopole_params(ma, mb));
+
+        let times  = read_f64s("output_t/t_out.bin");
+        let states = read_f64s("output_x/x_out.bin");
+
+        assert_eq!(times.len(), 5, "expected 5 time records");
+        assert_eq!(states.len(), 5 * 30);
+        for &val in &states { assert!(!val.is_nan(), "NaN in state"); }
+        // r_y of the final record should be positive
+        assert!(states[4 * 30 + 1] > 0.0, "r_y should be positive after 4 steps");
+
+        cleanup();
+    }
+
+    // ── RK7(8) ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn rk87_adaptive_non_nan_consistent_sizes() {
+        let _g = INTEG_LOCK.lock().unwrap();
+        let ma = 5e11_f64;
+        let mb = 2e11_f64;
+        let g  = 6.674e-20_f64;
+        let a  = 10.0_f64;
+        let v  = (g * (ma + mb) / a).sqrt();
+
+        rk87(0.0, 10.0, circular_state(a, v), 1e-6, &monopole_params(ma, mb));
+
+        let times  = read_f64s("output_t/t_out.bin");
+        let states = read_f64s("output_x/x_out.bin");
+
+        assert!(times.len() >= 2, "expected at least initial + 1 accepted step");
+        assert_eq!(states.len(), times.len() * 30, "time and state record counts must match");
+        for &val in &states { assert!(!val.is_nan(), "NaN in state"); }
+
+        cleanup();
+    }
+
+    // ── LGVI ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn lgvi_one_step_file_size_and_non_nan() {
+        let _g = INTEG_LOCK.lock().unwrap();
+        let ma = 5e11_f64;
+        let mb = 2e11_f64;
+        let g  = 6.674e-20_f64;
+        let a  = 10.0_f64;
+        let v  = (g * (ma + mb) / a).sqrt();
+        let h  = 1.0_f64;
+
+        lgvi_integ(0.0, h, circular_state(a, v), h, &monopole_params(ma, mb));
+
+        let times  = read_f64s("output_t/t_out.bin");
+        let states = read_f64s("output_x/x_out.bin");
+
+        assert_eq!(times.len(), 2, "expected 2 time records");
+        assert_eq!(states.len(), 2 * 30);
+        for &val in &states { assert!(!val.is_nan(), "NaN in state"); }
+
+        cleanup();
     }
 }

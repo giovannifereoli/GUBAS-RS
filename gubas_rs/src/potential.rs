@@ -1,10 +1,13 @@
-// potential.rs — Mutual gravitational potential and its derivatives
-//
-// Implements the Hou 2016 mutual potential expansion and all partial
-// derivatives needed by the equations of motion.
-//
-// All functions mirror their C++ counterparts exactly.
-// Units throughout: km, kg, s.
+//! Mutual gravitational potential and its partial derivatives (Hou 2016).
+//!
+//! All functions are generic over [`Scalar`] so that `Dual` types can flow
+//! through for STM / parameter-sensitivity computation.  Units: km, kg, s.
+//!
+//! | Function | Purpose |
+//! |---|---|
+//! | [`potential`] | Total mutual potential energy |
+//! | [`du_x`] | ∂U/∂r — used for translational EOM |
+//! | [`du_c`] | ∂U/∂C — one rotation-matrix column, used for torques |
 
 use crate::coefficients::t_ind;
 use crate::inertia::dt_dc;
@@ -320,4 +323,113 @@ pub fn map_potential_partials_rhs(
     });
 
     (tbp, du_dr, du_cols)
+}
+
+// ── tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::coefficients::{a_calc, b_calc, tk_calc};
+    use crate::types::Cube;
+
+    fn abs_close(a: f64, b: f64, tol: f64) {
+        assert!((a - b).abs() < tol, "expected {b:.6e}, got {a:.6e}");
+    }
+    fn rel_close(a: f64, b: f64, tol: f64) {
+        assert!((a - b).abs() / b.abs() < tol, "expected {b:.6e}, got {a:.6e}");
+    }
+
+    // ── de_dx ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn de_dx_diagonal() {
+        // e = [0.6, 0.8, 0], r = 5: ∂e₀/∂x₀ = (x₁²+x₂²)/r³ = 16/125
+        let e: crate::math3::Vec3 = [0.6, 0.8, 0.0];
+        abs_close(de_dx(e, 5.0, 0, 0), 16.0 / 125.0, 1e-14);
+    }
+
+    #[test]
+    fn de_dx_off_diagonal() {
+        // ∂e₀/∂x₁ = −(x₀·x₁)/r³ = −12/125
+        let e: crate::math3::Vec3 = [0.6, 0.8, 0.0];
+        abs_close(de_dx(e, 5.0, 0, 1), -12.0 / 125.0, 1e-14);
+    }
+
+    #[test]
+    fn de_dx_unit_x_diagonal_zero() {
+        // e = [1,0,0]: ∂e₀/∂x₀ = (0+0)/r³ = 0
+        abs_close(de_dx([1.0, 0.0, 0.0], 3.0, 0, 0), 0.0, 1e-14);
+    }
+
+    // ── u_tilde ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn u_tilde_monopole_equals_mass_product() {
+        // n=0: ũ₀ = tk[0][0]·a[0]·b[0]·Ma·Mb = Ma·Mb
+        let ma = 1e12_f64;
+        let mb = 5e11_f64;
+        let tk = tk_calc(0);
+        let a  = a_calc(0);
+        let b  = b_calc(0);
+        let mut ta = Cube::new(0);  ta.set(0, 0, 0, ma);
+        let mut tb = Cube::new(0);  tb.set(0, 0, 0, mb);
+        let e: crate::math3::Vec3 = [1.0, 0.0, 0.0];
+        let result = u_tilde(0, 0, &tk, &a, &b, e, &ta, &tb);
+        rel_close(result, ma * mb, 1e-14);
+    }
+
+    // ── potential ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn potential_monopole_newtonian() {
+        // Order-0 expansion recovers U = −G·Ma·Mb/r
+        let g  = 6.674e-20_f64;
+        let ma = 1e12_f64;
+        let mb = 5e11_f64;
+        let r  = 10.0_f64;
+        let tk = tk_calc(0);
+        let a  = a_calc(0);
+        let b  = b_calc(0);
+        let mut ta = Cube::new(0);  ta.set(0, 0, 0, ma);
+        let mut tb = Cube::new(0);  tb.set(0, 0, 0, mb);
+        let e: crate::math3::Vec3 = [1.0, 0.0, 0.0];
+        let u = potential(g, 0, &tk, &a, &b, e, r, &ta, &tb);
+        rel_close(u, -g * ma * mb / r, 1e-12);
+    }
+
+    // ── du_x ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn du_x_monopole_radial_force() {
+        // Order-0 with e=[1,0,0]: ∂U/∂x₀ = G·Ma·Mb/r²
+        let g  = 6.674e-20_f64;
+        let ma = 1e12_f64;
+        let mb = 5e11_f64;
+        let r  = 10.0_f64;
+        let tk = tk_calc(0);
+        let a  = a_calc(0);
+        let b  = b_calc(0);
+        let mut ta = Cube::new(0);  ta.set(0, 0, 0, ma);
+        let mut tb = Cube::new(0);  tb.set(0, 0, 0, mb);
+        let e: crate::math3::Vec3 = [1.0, 0.0, 0.0];
+        let du = du_x(g, 0, &tk, &a, &b, e, r, 0, &ta, &tb);
+        rel_close(du, g * ma * mb / (r * r), 1e-12);
+    }
+
+    #[test]
+    fn du_x_monopole_transverse_zero() {
+        // For e=[1,0,0], ∂U/∂x₁ = 0 by symmetry
+        let g  = 6.674e-20_f64;
+        let ma = 1e12_f64;
+        let mb = 5e11_f64;
+        let tk = tk_calc(0);
+        let a  = a_calc(0);
+        let b  = b_calc(0);
+        let mut ta = Cube::new(0);  ta.set(0, 0, 0, ma);
+        let mut tb = Cube::new(0);  tb.set(0, 0, 0, mb);
+        let e: crate::math3::Vec3 = [1.0, 0.0, 0.0];
+        let du = du_x(g, 0, &tk, &a, &b, e, 10.0, 1, &ta, &tb);
+        abs_close(du, 0.0, 1e-40);
+    }
 }

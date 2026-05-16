@@ -214,7 +214,7 @@ where
 
 /// A(x, t) = ∂f/∂x  via forward-mode automatic differentiation (exact).
 ///
-/// Column j: seed x_dual[j].eps = 1, call ode_dual, read output .eps.
+/// Column j: seed `x_dual[j].eps = 1`, call ode_dual, read output `.eps`.
 /// No step-size to tune; no truncation error beyond f64 rounding.
 pub fn jacobian_ad<FD>(x: &[f64; 30], t: f64, ode_dual: &FD) -> Phi
 where
@@ -680,7 +680,7 @@ where
 
 /// Write the STM history to `{dir}/phi_out.bin`  (little-endian f64, row-major).
 ///
-/// Layout per recorded step: 900 f64 values = Φ[0][0] … Φ[29][29].
+/// Layout per recorded step: 900 f64 values = `Φ[0][0]` … `Φ[29][29]`.
 ///
 /// Read in Python:
 /// ```python
@@ -736,7 +736,7 @@ pub fn write_phi_t_bin(dir: &str, times: &[f64]) -> std::io::Result<()> {
 //   augmented_state_ode_rhs(z_phi_flat, t, aug_ode_dual)  → full ODE RHS
 
 /// Compute [A (30×30), B (30×N)] from one augmented dual-ODE call per column.
-/// A[i][j] = ∂f_i/∂x_j,   B[i][k] = ∂f_i/∂θ_k.
+/// `A[i][j]` = ∂f_i/∂x_j,   `B[i][k]` = ∂f_i/∂θ_k.
 pub fn jacobian_aug_ad<FD>(
     x:             &[f64; 30],
     theta:         &[f64],       // N parameters
@@ -932,7 +932,7 @@ pub fn assemble_phi_aug(phi_xx: &Phi, phi_xt: &[f64], n_theta: usize) -> Vec<f64
 /// z = [x(30); θ(N)].  Returns:
 ///   - ż        : Vec of length 30+N   (θ̇ = 0 for last N entries)
 ///   - A_aug_flat: Vec of length (30+N)²  (row-major)
-///     A_aug = | A  B |   A[i][j]=∂f_i/∂x_j,   B[i][k]=∂f_i/∂θ_k
+///     A_aug = | A  B |   `A[i][j]`=∂f_i/∂x_j,   `B[i][k]`=∂f_i/∂θ_k
 ///             | 0  0 |
 pub fn eval_aug_dynamics_and_jacobian<FD>(
     x:            &[f64; 30],

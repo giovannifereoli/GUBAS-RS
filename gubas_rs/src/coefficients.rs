@@ -1,7 +1,14 @@
-// coefficients.rs — Hou 2016 expansion coefficients
-//
-// Computes tk, a, and b coefficient arrays used by the mutual potential
-// and its derivatives.  All logic mirrors the C++ functions exactly.
+//! Expansion coefficients for the Hou 2016 mutual gravitational potential.
+//!
+//! Computes the `tk`, `a`, and `b` coefficient arrays required by the mutual
+//! potential series.  All recursions mirror the original C++ implementation.
+//!
+//! # Coefficient layout
+//! The 7-D `a` / `b` arrays are stored flat via [`t_ind`]:
+//! ```text
+//! flat_idx = a·dim⁶ + b·dim⁵ + c·dim⁴ + d·dim³ + e·dim² + f·dim + g
+//! ```
+//! where `dim = n + 1` and `n` is the truncation order.
 
 /// Double factorial helper (matches `double factorial(double x)` in C++).
 pub fn factorial(x: f64) -> f64 {
@@ -185,4 +192,142 @@ pub fn b_calc(n: usize) -> Vec<f64> {
         }
     }
     b
+}
+
+// ── tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn close(a: f64, b: f64) {
+        assert!((a - b).abs() < 1e-14, "expected {b:.16}, got {a:.16}");
+    }
+
+    // ── factorial ────────────────────────────────────────────────────────────
+
+    #[test] fn factorial_zero() { close(factorial(0.0), 1.0); }
+    #[test] fn factorial_one()  { close(factorial(1.0), 1.0); }
+    #[test] fn factorial_five() { close(factorial(5.0), 120.0); }
+
+    // ── ifact ────────────────────────────────────────────────────────────────
+
+    #[test] fn ifact_zero() { close(ifact(0), 1.0); }
+    #[test] fn ifact_one()  { close(ifact(1), 1.0); }
+    #[test] fn ifact_five() { close(ifact(5), 120.0); }
+
+    // ── t_ind ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn t_ind_all_zero() {
+        assert_eq!(t_ind(0, 0, 0, 0, 0, 0, 0, 5), 0);
+    }
+
+    #[test]
+    fn t_ind_unit_last() {
+        // g=1, dim=3 → flat index = 1
+        assert_eq!(t_ind(0, 0, 0, 0, 0, 0, 1, 3), 1);
+    }
+
+    #[test]
+    fn t_ind_unit_f() {
+        // f=1, g=0, dim=3 → 1*3 = 3
+        assert_eq!(t_ind(0, 0, 0, 0, 0, 1, 0, 3), 3);
+    }
+
+    #[test]
+    fn t_ind_unit_a() {
+        // a=1, all others=0, dim=4 → 4^6 = 4096
+        assert_eq!(t_ind(1, 0, 0, 0, 0, 0, 0, 4), 4_usize.pow(6));
+    }
+
+    // ── coeff_vec_len ────────────────────────────────────────────────────────
+
+    #[test]
+    fn coeff_vec_len_zero() {
+        // t_ind(0,..,0, dim=1) = 0 → length = 1
+        assert_eq!(coeff_vec_len(0), 1);
+    }
+
+    #[test]
+    fn coeff_vec_len_two() {
+        // t_ind(2,..,2, dim=3) = 2*(3^6+3^5+3^4+3^3+3^2+3+1) = 2*1093 = 2186 → length=2187
+        assert_eq!(coeff_vec_len(2), 2187);
+    }
+
+    // ── tk_calc ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn tk_calc_n0_t00_is_one() {
+        // n=0 even: t[0][0] = (−1)^0 · 0! / (2^0 · (0!)²) = 1
+        close(tk_calc(0)[0][0], 1.0);
+    }
+
+    #[test]
+    fn tk_calc_n1_t10_is_one() {
+        // n=1 odd: t[1][0] = (−1)^0 · 1! / (2^0 · (0!)²) = 1
+        close(tk_calc(2)[1][0], 1.0);
+    }
+
+    #[test]
+    fn tk_calc_n2_t20_is_minus_half() {
+        // n=2 even: t[2][0] = (−1)^1 · 2! / (2^2 · (1!)²) = −2/4 = −0.5
+        close(tk_calc(2)[2][0], -0.5);
+    }
+
+    #[test]
+    fn tk_calc_dimensions() {
+        let m = 4;
+        let tk = tk_calc(m);
+        assert_eq!(tk.len(), m + 1);
+        let ncols = m / 2 + 2;
+        for row in &tk { assert_eq!(row.len(), ncols); }
+    }
+
+    // ── a_calc ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_calc_n0_monopole() {
+        let a = a_calc(0);
+        assert_eq!(a.len(), 1);
+        close(a[0], 1.0);
+    }
+
+    #[test]
+    fn a_calc_n1_seeds() {
+        // Order-1 seed values from Hou 2016 Table 1
+        let dim = 2; // n+1
+        let a = a_calc(1);
+        close(a[t_ind(1, 1, 0, 0, 0, 0, 0, dim)],  1.0);
+        close(a[t_ind(1, 0, 1, 0, 0, 0, 0, dim)],  1.0);
+        close(a[t_ind(1, 0, 0, 1, 0, 0, 0, dim)],  1.0);
+        close(a[t_ind(1, 0, 0, 0, 1, 0, 0, dim)], -1.0);
+        close(a[t_ind(1, 0, 0, 0, 0, 1, 0, dim)], -1.0);
+        close(a[t_ind(1, 0, 0, 0, 0, 0, 1, dim)], -1.0);
+    }
+
+    // ── b_calc ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn b_calc_n0_monopole() {
+        let b = b_calc(0);
+        assert_eq!(b.len(), 1);
+        close(b[0], 1.0);
+    }
+
+    #[test]
+    fn b_calc_n2_seeds() {
+        // Order-2 seed values from Hou 2016 (B tensor structure)
+        let dim = 3; // n+1
+        let b = b_calc(2);
+        close(b[t_ind(2, 2, 0, 0, 0, 0, 0, dim)],  1.0);
+        close(b[t_ind(2, 0, 2, 0, 0, 0, 0, dim)],  1.0);
+        close(b[t_ind(2, 0, 0, 2, 0, 0, 0, dim)],  1.0);
+        close(b[t_ind(2, 0, 0, 0, 2, 0, 0, dim)],  1.0);
+        close(b[t_ind(2, 0, 0, 0, 0, 2, 0, dim)],  1.0);
+        close(b[t_ind(2, 0, 0, 0, 0, 0, 2, dim)],  1.0);
+        close(b[t_ind(2, 1, 0, 0, 1, 0, 0, dim)], -2.0);
+        close(b[t_ind(2, 0, 1, 0, 0, 1, 0, dim)], -2.0);
+        close(b[t_ind(2, 0, 0, 1, 0, 0, 1, dim)], -2.0);
+    }
 }

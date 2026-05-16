@@ -1,12 +1,18 @@
-// lgvi.rs — Lie Group Variational Integrator (LGVI) helpers
-//
-// Implements the Hamiltonian map from Lee 2007, used by lgvi_integ in
-// integrators.rs.  All intermediate computations are done in dimensionless
-// (normalized) variables; physical inputs/outputs use km / kg / s.
-//
-// Key functions:
-//   map_potential_partials_lgvi — du/dr and gravity torque M for LGVI step
-//   hamiltonian_map             — one full LGVI time step
+//! Lie Group Variational Integrator (LGVI) helpers (Lee 2007).
+//!
+//! Implements the Hamiltonian map used by `lgvi_integ`.  All intermediate
+//! computations use dimensionless normalised variables; physical inputs/outputs
+//! are in km / kg / s.
+//!
+//! Rotation updates are solved implicitly with two Newton solvers:
+//! - Cayley parametrisation (`f_cayley_calc`) — primary solver
+//! - Rodrigues / exponential-map fallback (`f_exp_calc_scaled`)
+//!
+//! # Normalisation scales
+//! Given initial state `x0` with `|r0| = nr`:
+//! - Length scale: `nr` (km)
+//! - Mass scale:   `nm = Ma + Mb` (kg)
+//! - Time scale:   `nt = sqrt(G·nm / nr³)` (1/s)
 
 use crate::inertia::{dt_dc, inertia_rot};
 use crate::math3::*;
@@ -192,7 +198,7 @@ fn f_cayley_calc(h: f64, g_in: Vec3, i_mat: Mat3) -> (Vec3, Mat3) {
 /// Inputs:
 ///   `h`       — time step (s, physical)
 ///   `params`  — simulation parameters
-///   `x`       — current state [r,v,wc,ws,Cc,C] (30 elements, physical)
+///   `x`       — current state \[r,v,wc,ws,Cc,C\] (30 elements, physical)
 ///   `x0`      — initial state used for normalization
 ///   `du_dr_n` — previous potential partial ∂U/∂r (physical, km/kg/s²·kg = force/mass … km²/s²/km)
 ///   `m_n`     — previous gravity torque on secondary (physical, N·km)
@@ -341,4 +347,105 @@ pub fn hamiltonian_map(
     ];
 
     (x_out, du_dr_n1, m_n1)
+}
+
+// ── tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::coefficients::{a_calc, b_calc, tk_calc};
+    use crate::types::{Cube, Params};
+
+    fn abs_close(a: f64, b: f64, tol: f64) {
+        assert!((a - b).abs() < tol, "expected {b:.6e}, got {a:.6e}");
+    }
+    fn rel_close(a: f64, b: f64, tol: f64) {
+        assert!((a - b).abs() / b.abs() < tol, "expected {b:.6e}, got {a:.6e}");
+    }
+
+    fn monopole_params(ma: f64, mb: f64) -> Params {
+        let g     = 6.674e-20_f64;
+        let m_red = ma * mb / (ma + mb);
+        let nu    = mb / (ma + mb);
+        let n     = 0_usize;
+        let mut ta = Cube::new(n);  ta.set(0, 0, 0, ma);
+        let mut tb = Cube::new(n);  tb.set(0, 0, 0, mb);
+        let mut p = Params {
+            g, m: m_red, nu,
+            ta, tb,
+            ia: [1.0, 1.0, 1.0],
+            ib: [1.0, 1.0, 1.0],
+            n, tk: tk_calc(n), a: a_calc(n), b: b_calc(n),
+            flyby_toggle: 0, helio_toggle: 0, sg_toggle: 0, tt_toggle: 0,
+            mplanet: 0.0,
+            a_hyp: -1.0, e_hyp: 1.5, i_hyp: 0.0, raan_hyp: 0.0,
+            om_hyp: 0.0, tau_hyp: 0.0, n_hyp: 0.0,
+            msolar: 0.0,
+            a_helio: 1.0, e_helio: 0.0, i_helio: 0.0, raan_helio: 0.0,
+            om_helio: 0.0, tau_helio: 0.0, n_helio: 0.0,
+            sol_rad: 0.0, au_def: 1.496e8, mean_motion: 0.0,
+            love1: 0.0, love2: 0.0, refrad1: 1.0, refrad2: 1.0,
+            rho_a: 1e12, rho_b: 1e12, eps1: 0.0, eps2: 0.0,
+            ida: [[0.0; 3]; 3],
+            idb: [[0.0; 3]; 3],
+            msun: 2e30,
+        };
+        p.compute_lgvi_inertia();
+        p
+    }
+
+    // ── outer product ────────────────────────────────────────────────────────
+
+    #[test]
+    fn outer_product_values() {
+        let a: Vec3 = [1.0, 2.0, 3.0];
+        let b: Vec3 = [4.0, 5.0, 6.0];
+        let m = outer(a, b);
+        // m[i][j] = a[i]*b[j]
+        abs_close(m[0][0],  4.0, 1e-14);
+        abs_close(m[0][2],  6.0, 1e-14);
+        abs_close(m[1][0],  8.0, 1e-14);
+        abs_close(m[2][1], 15.0, 1e-14);
+        abs_close(m[2][2], 18.0, 1e-14);
+    }
+
+    #[test]
+    fn outer_antisymmetry() {
+        // outer(a,b)[i][j] = outer(b,a)[j][i]
+        let a: Vec3 = [1.0, -2.0, 3.0];
+        let b: Vec3 = [0.5,  4.0, 1.0];
+        let mab = outer(a, b);
+        let mba = outer(b, a);
+        for i in 0..3 {
+            for j in 0..3 {
+                abs_close(mab[i][j], mba[j][i], 1e-14);
+            }
+        }
+    }
+
+    // ── map_potential_partials_lgvi ──────────────────────────────────────────
+
+    #[test]
+    fn map_partials_monopole_radial_force() {
+        // For monopole (n=0), r=[a,0,0], C=I:
+        // du/dr[0] = G·Ma·Mb/r², du/dr[1,2] = 0, torque M = 0
+        let ma = 5.0e11_f64;
+        let mb = 2.0e11_f64;
+        let g  = 6.674e-20_f64;
+        let a  = 10.0_f64;
+        let p  = monopole_params(ma, mb);
+        let c: Mat3 = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let r: Vec3 = [a, 0.0, 0.0];
+
+        let (du_dr, m_grav) = map_potential_partials_lgvi(c, r, &p);
+
+        rel_close(du_dr[0], g * ma * mb / (a * a), 1e-10);
+        abs_close(du_dr[1], 0.0, 1e-40);
+        abs_close(du_dr[2], 0.0, 1e-40);
+        // Monopole has no orientation dependence → zero torque
+        abs_close(m_grav[0], 0.0, 1e-30);
+        abs_close(m_grav[1], 0.0, 1e-30);
+        abs_close(m_grav[2], 0.0, 1e-30);
+    }
 }

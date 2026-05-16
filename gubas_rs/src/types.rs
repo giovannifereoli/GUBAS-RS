@@ -1,13 +1,11 @@
-// types.rs — shared data structures
-//
-// `Cube` replaces Armadillo's `cube` type.
-// `Params` carries all the read-only simulation parameters that are threaded
-// through the integrators and ODE function.
-// `Initialization` holds the values read from `ic_input.txt`.
-//
-// Both `Cube<T>` and `Params<T>` are generic over the `Scalar` trait so that
-// dual-number types can flow through the physics for auto-diff (STM / parameter
-// sensitivity).  The `T = f64` default keeps all existing callers unchanged.
+//! Shared data structures: [`Cube`], [`Params`], and [`Initialization`].
+//!
+//! - [`Cube<T>`] — 3-D array replacing Armadillo's `cube`.  Flat row-major
+//!   storage, indexed `(l, m, n)`.
+//! - [`Params<T>`] — all read-only simulation parameters threaded through the
+//!   ODE and integrators.  Generic over [`Scalar`] so `Dual` types can replace
+//!   `f64` for auto-differentiation.
+//! - [`promote_params`] — lift `Params<f64>` → `Params<U>` for dual-number AD.
 
 use crate::math3::{Mat3, Scalar, Vec3};
 
@@ -75,9 +73,9 @@ impl<T: Scalar> Cube<T> {
 impl Cube<f64> {
     /// Save to CSV in the same layout as Armadillo's `save(..., csv_ascii)`.
     ///
-    /// The C++ stacks slices vertically: slice 0 (T[:,:,0]) then slice 1
-    /// (T[:,:,1]) … so the CSV has `(order+1)^2` rows and `(order+1)` cols.
-    /// Each row `s*(order+1) + l`, col `m` = T[l][m][s].
+    /// The C++ stacks slices vertically: slice 0 (`T[:,:,0]`) then slice 1
+    /// (`T[:,:,1]`) … so the CSV has `(order+1)^2` rows and `(order+1)` cols.
+    /// Each row `s*(order+1) + l`, col `m` = `T[l][m][s]`.
     pub fn save_csv(&self, path: &str) -> std::io::Result<()> {
         use std::io::Write;
         let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
@@ -374,4 +372,132 @@ pub struct Initialization {
     pub refrad1: f64, pub refrad2: f64,
     pub eps1: f64,    pub eps2: f64,
     pub msun: f64,
+}
+
+// ── tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::coefficients::{a_calc, b_calc, tk_calc};
+
+    // ── Cube ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn cube_new_all_zeros() {
+        let c = Cube::<f64>::new(2);
+        for i in 0..=2 { for j in 0..=2 { for k in 0..=2 {
+            assert_eq!(c.get(i, j, k), 0.0);
+        }}}
+    }
+
+    #[test]
+    fn cube_set_get_roundtrip() {
+        let mut c = Cube::new(3);
+        c.set(1, 2, 3, 42.0);
+        assert_eq!(c.get(1, 2, 3), 42.0);
+        assert_eq!(c.get(0, 0, 0), 0.0); // others unaffected
+    }
+
+    #[test]
+    fn cube_add_accumulates() {
+        let mut c = Cube::new(2);
+        c.set(1, 1, 1, 3.0);
+        c.add(1, 1, 1, 7.0);
+        assert_eq!(c.get(1, 1, 1), 10.0);
+    }
+
+    #[test]
+    fn cube_zeros_resets_all() {
+        let mut c = Cube::new(2);
+        c.set(0, 1, 2, 99.0);
+        c.zeros();
+        assert_eq!(c.get(0, 1, 2), 0.0);
+    }
+
+    #[test]
+    fn cube_extremes_addressable() {
+        // Can write to and read from the [0,0,0] and [n,n,n] corners
+        let n = 4;
+        let mut c = Cube::new(n);
+        c.set(0, 0, 0, 1.0);
+        c.set(n, n, n, 2.0);
+        assert_eq!(c.get(0, 0, 0), 1.0);
+        assert_eq!(c.get(n, n, n), 2.0);
+    }
+
+    #[test]
+    fn cube_order_field_matches_constructor() {
+        let c = Cube::<f64>::new(5);
+        assert_eq!(c.order, 5);
+    }
+
+    // ── Params::compute_lgvi_inertia ─────────────────────────────────────────
+
+    fn make_params_with_inertia(ia: [f64; 3], ib: [f64; 3]) -> Params {
+        let n = 0usize;
+        let mut ta = Cube::new(n);  ta.set(0, 0, 0, 1e12);
+        let mut tb = Cube::new(n);  tb.set(0, 0, 0, 5e11);
+        let ma = 1e12_f64;
+        let mb = 5e11_f64;
+        let mut p = Params {
+            g: 6.674e-20, m: ma*mb/(ma+mb), nu: mb/(ma+mb),
+            ta, tb, ia, ib,
+            n, tk: tk_calc(n), a: a_calc(n), b: b_calc(n),
+            flyby_toggle: 0, helio_toggle: 0, sg_toggle: 0, tt_toggle: 0,
+            mplanet: 0.0, a_hyp: -1.0, e_hyp: 1.5,
+            i_hyp: 0.0, raan_hyp: 0.0, om_hyp: 0.0, tau_hyp: 0.0, n_hyp: 0.0,
+            msolar: 0.0, a_helio: 1.0, e_helio: 0.0,
+            i_helio: 0.0, raan_helio: 0.0, om_helio: 0.0, tau_helio: 0.0, n_helio: 0.0,
+            sol_rad: 0.0, au_def: 1.496e8, mean_motion: 0.0,
+            love1: 0.0, love2: 0.0, refrad1: 1.0, refrad2: 1.0,
+            rho_a: 1e12, rho_b: 1e12, eps1: 0.0, eps2: 0.0,
+            ida: [[0.0; 3]; 3], idb: [[0.0; 3]; 3],
+            msun: 2e30,
+        };
+        p.compute_lgvi_inertia();
+        p
+    }
+
+    #[test]
+    fn lgvi_inertia_diagonal_formula() {
+        // IdA[i][i] = Σ_{j≠i} IA[j]  =  sum of the other two principal moments
+        // ia = [2, 3, 4] → ida = diag([3+4−2, 2+4−3, 2+3−4]) = diag([5, 3, 1])
+        let p = make_params_with_inertia([2.0, 3.0, 4.0], [2.0, 3.0, 4.0]);
+        let tol = 1e-14;
+        assert!((p.ida[0][0] - 5.0).abs() < tol, "ida[0][0]={}", p.ida[0][0]);
+        assert!((p.ida[1][1] - 3.0).abs() < tol, "ida[1][1]={}", p.ida[1][1]);
+        assert!((p.ida[2][2] - 1.0).abs() < tol, "ida[2][2]={}", p.ida[2][2]);
+        // Off-diagonal must be zero
+        assert!((p.ida[0][1]).abs() < tol);
+        assert!((p.ida[1][2]).abs() < tol);
+        assert!((p.ida[0][2]).abs() < tol);
+    }
+
+    #[test]
+    fn lgvi_inertia_equal_moments() {
+        // ia = [I, I, I]: ida[i][i] = 2*(3I/2 − I) = I
+        let p = make_params_with_inertia([1.0, 1.0, 1.0], [1.0, 1.0, 1.0]);
+        let tol = 1e-14;
+        for i in 0..3 {
+            assert!((p.ida[i][i] - 1.0).abs() < tol, "ida[{i}][{i}]={}", p.ida[i][i]);
+            for j in 0..3 { if i != j {
+                assert!((p.ida[i][j]).abs() < tol, "off-diag ida[{i}][{j}]≠0");
+            }}
+        }
+    }
+
+    #[test]
+    fn lgvi_inertia_matches_manual_formula() {
+        // IdA = 2*(0.5*tr(IA)*I₃ − diag(IA))
+        // Verify with ia = [1, 2, 6]
+        let ia: [f64; 3] = [1.0, 2.0, 6.0];
+        let p = make_params_with_inertia(ia, ia);
+        let tr = ia[0] + ia[1] + ia[2]; // = 9
+        for i in 0..3 {
+            let expected = tr - 2.0 * ia[i];
+            assert!((p.ida[i][i] - expected).abs() < 1e-14,
+                    "ida[{i}][{i}]: expected {expected}, got {}", p.ida[i][i]);
+        }
+    }
 }

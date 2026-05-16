@@ -1,3 +1,296 @@
+//! # GUBAS-RS — General Use Binary Asteroid Simulator (Rust)
+//!
+//! ---
+//!
+//! ## Statement of Need
+//!
+//! Binary asteroid systems — two gravitationally bound rocky bodies — are among
+//! the most informative objects for planetary science: their mutual orbit encodes
+//! both masses, while the coupled spin–orbit evolution constrains the internal
+//! mass distribution of each body.  Modelling this system accurately requires the
+//! **Full Two-Body Problem (F2BP)**, in which both bodies are treated as extended,
+//! non-spherical masses with arbitrary gravity fields.
+//!
+//! Existing open tools either approximate one or both bodies as point masses, or
+//! lack the sensitivity analysis machinery needed for **orbit determination (OD)**
+//! from spacecraft tracking data.  GUBAS-RS fills this gap by providing:
+//!
+//! 1. **High-fidelity F2BP dynamics** — mutual gravitational potential evaluated
+//!    as a Hou 2016 series in inertia integrals T\_{ijk}, valid for any body shape.
+//! 2. **Exact State Transition Matrix** — forward-mode automatic differentiation
+//!    ([`dual`]) replaces finite differences; no step-size tuning, no truncation error.
+//! 3. **Parameter sensitivity for gravity field estimation** — the augmented STM
+//!    propagates ∂x/∂T\_{ijk} simultaneously for *both* bodies ([`stm`]), enabling
+//!    direct use in batch least-squares or Kalman filters.
+//! 4. **Stokes coefficient conversion** — the linear map
+//!    ∂x/∂T\_{ijk} → ∂x/∂C\_{lm}/S\_{lm} ([`stokes`]) delivers partials in the
+//!    spherical harmonic basis used by standard geodesy tools.
+//! 5. **Python interface** — compiled via PyO3/maturin so that any Python OD
+//!    framework can call the Rust core with zero subprocess overhead.
+//!
+//! ### Target audience
+//!
+//! - **Planetary scientists** modelling binary asteroid dynamics (e.g. Didymos–
+//!   Dimorphos post-DART, binary near-Earth asteroids).
+//! - **Astrodynamicists** building OD pipelines that need trajectory + STM from
+//!   a single consistent F2BP model.
+//! - **Researchers** studying DART/Hera mission science: gravity field recovery
+//!   from radiometric tracking.
+//!
+//! ---
+//!
+//! ## Installation
+//!
+//! ### Dependencies
+//!
+//! | Dependency | Version | Purpose |
+//! |---|---|---|
+//! | Rust toolchain | ≥ 1.75 | compile the crate |
+//! | Python | ≥ 3.8 | Python interface and test suite |
+//! | `maturin` | ≥ 1.0 | build the Python extension |
+//! | `numpy` | any | array handling in Python examples |
+//! | `scipy` | any | `solve_ivp` in OD examples |
+//! | `matplotlib` | any | plotting in example scripts |
+//!
+//! Install Rust via [rustup](https://rustup.rs), then Python dependencies:
+//!
+//! ```bash
+//! pip install maturin numpy scipy matplotlib
+//! ```
+//!
+//! ### Build as a Python extension (recommended for OD use)
+//!
+//! ```bash
+//! python -m venv .venv && source .venv/bin/activate
+//! cd gubas_rs
+//! maturin develop --release   # installs gubas_rs into the active environment
+//! python -c "import gubas_rs; print('ok')"
+//! ```
+//!
+//! ### Build the standalone Rust binary
+//!
+//! ```bash
+//! cd gubas_rs
+//! cargo build --release
+//! # binary: gubas_rs/target/release/hou_cpp_final
+//! ```
+//!
+//! ---
+//!
+//! ## Module Overview
+//!
+//! | Module | Role |
+//! |---|---|
+//! | [`dynamics`] | F2BP ODE right-hand side (`hou_ode`) — 30-element state |
+//! | [`integrators`] | RK4, Adams-Bashforth-Moulton, adaptive RK7(8), LGVI |
+//! | [`stm`] | STM and augmented-STM propagators (∂x/∂x₀ and ∂x/∂θ) |
+//! | [`stokes`] | N\_{ijk} → C\_{lm}/S\_{lm} Stokes matrix (Tricarico 2008) |
+//! | [`potential`] | Mutual gravitational potential and all partial derivatives |
+//! | [`coefficients`] | Hou 2016 expansion coefficients (t\_k, a\_k, b\_k) |
+//! | [`inertia`] | Inertia integrals T\_{ijk} from ellipsoid or polyhedron |
+//! | [`orbit`] | Kepler's equation solver (elliptic + hyperbolic), elements → Cartesian |
+//! | [`dual`] | Forward-mode dual number: `Dual = a + bε`, ε² = 0 |
+//! | [`math3`] | 3-vector / 3×3-matrix primitives (`cross`, `inv`, `tilde`, …) |
+//! | [`types`] | `Cube<T>`, `Params<T>` — generic simulation data structures |
+//!
+//! Every public function is documented with its arguments, return value, units,
+//! and mathematical background.  See the sidebar for the full API reference.
+//!
+//! ---
+//!
+//! ## Example Usage
+//!
+//! ### Minimal Rust example — one RK4 step with point masses
+//!
+//! All physical units are **km / kg / s**.
+//!
+//! ```rust,ignore
+//! use gubas_rs::{
+//!     coefficients::{a_calc, b_calc, tk_calc},
+//!     integrators::rk4_stack,
+//!     types::{Cube, Params},
+//! };
+//!
+//! // Body masses (Didymos system, kg)
+//! let ma: f64 = 5.32e11;
+//! let mb: f64 = 4.94e9;
+//! let g:  f64 = 6.674e-20; // km³/(kg·s²)
+//!
+//! // Zeroth-order expansion: point masses
+//! let n = 0usize;
+//! let mut ta = Cube::new(n);  ta.set(0, 0, 0, ma);
+//! let mut tb = Cube::new(n);  tb.set(0, 0, 0, mb);
+//!
+//! let mut params = Params {
+//!     g, m: ma * mb / (ma + mb), nu: mb / (ma + mb),
+//!     ta, tb,
+//!     ia: [3.01e19, 3.01e19, 3.01e19], // primary MOI (kg·km²)
+//!     ib: [5.0e16,  5.0e16,  5.0e16],  // secondary MOI
+//!     n, tk: tk_calc(n), a: a_calc(n), b: b_calc(n),
+//!     flyby_toggle: 0, helio_toggle: 0, sg_toggle: 0, tt_toggle: 0,
+//! #   mplanet: 0.0, a_hyp: -1.0, e_hyp: 1.5,
+//! #   i_hyp: 0.0, raan_hyp: 0.0, om_hyp: 0.0, tau_hyp: 0.0, n_hyp: 0.0,
+//! #   msolar: 0.0, a_helio: 1.0, e_helio: 0.0,
+//! #   i_helio: 0.0, raan_helio: 0.0, om_helio: 0.0, tau_helio: 0.0, n_helio: 0.0,
+//! #   sol_rad: 0.0, au_def: 1.496e8, mean_motion: 0.0,
+//! #   love1: 0.0, love2: 0.0, refrad1: 1.0, refrad2: 1.0,
+//! #   rho_a: 1e12, rho_b: 1e12, eps1: 0.0, eps2: 0.0,
+//! #   ida: [[0.0; 3]; 3], idb: [[0.0; 3]; 3], msun: 2e30,
+//! };
+//! params.compute_lgvi_inertia();
+//!
+//! // Circular orbit initial state: r = [1.19 km, 0, 0], Cc = C = I₃
+//! let a_orb = 1.19_f64;
+//! let v_c   = (g * (ma + mb) / a_orb).sqrt();
+//! let eye   = [1.0_f64, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+//! let x0: [f64; 30] = [
+//!     a_orb, 0.0, 0.0,  0.0, v_c, 0.0,       // r (km), v (km/s)
+//!     0.0, 0.0, 0.0,    0.0, 0.0, 0.0,        // ωc, ωs (rad/s)
+//!     eye[0], eye[1], eye[2], eye[3], eye[4],
+//!     eye[5], eye[6], eye[7], eye[8],          // Cc (row-major)
+//!     eye[0], eye[1], eye[2], eye[3], eye[4],
+//!     eye[5], eye[6], eye[7], eye[8],          // C  (row-major)
+//! ];
+//!
+//! // Integrate 100 s at h = 1 s — writes output_t/ and output_x/
+//! rk4_stack(0.0, 100.0, x0, 1.0, &params);
+//! ```
+//!
+//! ### Full OD pipeline in Python
+//!
+//! After building the extension with `maturin develop --release`:
+//!
+//! ```python
+//! import gubas_rs, numpy as np
+//! from stokes_utils import convert_phi_xt_to_cs, cs_labels
+//! import os; os.chdir("example/")  # ic_input.txt must be in cwd
+//!
+//! # 1. Build the augmented model (degree-2 gravity for both bodies)
+//! model = gubas_rs.AugmentedDynamicsModel(
+//!     min_degree_a=2, max_degree_a=2,
+//!     min_degree_b=2, max_degree_b=2,
+//! )
+//! N_AUG = model.n_aug      # 30 + N_a + N_b  (e.g. 42 for deg-2 both)
+//! theta0 = np.array(model.theta_nominal)
+//! idx_a  = model.theta_indices_a  # list of (i,j,k) for primary T_{ijk}
+//! idx_b  = model.theta_indices_b
+//!
+//! # 2. Build augmented initial conditions
+//! x0  = ...  # 30-element state (km, km/s, rad/s, rotation matrices)
+//! z0  = np.concatenate([x0, theta0])
+//! y0  = np.concatenate([z0, np.eye(N_AUG).ravel()])   # state + Φ_aug
+//!
+//! # 3. Propagate with scipy (uses exact AD Jacobian internally)
+//! from scipy.integrate import solve_ivp
+//! sol = solve_ivp(
+//!     lambda t, y: np.array(model.eval_stm(y.tolist(), t)),
+//!     [0.0, 7200.0], y0, method="DOP853",
+//!     rtol=1e-10, atol=1e-13,
+//! )
+//! phi_aug = sol.y.T[:, N_AUG:].reshape(-1, N_AUG, N_AUG)
+//!
+//! # 4. Convert inertia-integral partials to spherical harmonic C/S partials
+//! phi_xta = phi_aug[:, :30, 30:30+model.n_theta_a]
+//! phi_xcs_a, _, _ = convert_phi_xt_to_cs(phi_xta, idx_a, 2, 2)
+//! # phi_xcs_a[k]: (30, 5) — ∂x(tₖ)/∂[C20,C21,S21,C22,S22] primary
+//! ```
+//!
+//! More complete examples are in `example/`:
+//!
+//! | Script | Demonstrates |
+//! |---|---|
+//! | `run_example.py` | Trajectory, energy and angular momentum conservation |
+//! | `run_example_OD.py` | STM propagation, `DynamicsModel.eval` |
+//! | `run_example_OD_stokes.py` | Single-body C/S partials |
+//! | `run_example_OD_stokes_2.py` | **Both-body C/S partials**, validation vs Rust reference |
+//!
+//! ---
+//!
+//! ## Automated Tests
+//!
+//! The test suite verifies every module against analytic reference values —
+//! no floating-point tolerances are loosened beyond what the physics demands.
+//!
+//! ### Rust tests — 108 tests across all 11 modules
+//!
+//! ```bash
+//! cd gubas_rs
+//! cargo test
+//! ```
+//!
+//! Expected:
+//! ```text
+//! running 108 tests
+//! test coefficients::tests::a_calc_n0_monopole ... ok
+//! ...
+//! test result: ok. 108 passed; 0 failed; 0 ignored
+//! ```
+//!
+//! Filter by module or test name:
+//! ```bash
+//! cargo test potential::     # only potential module
+//! cargo test oblate_c20      # any test whose name contains "oblate_c20"
+//! ```
+//!
+//! Key analytic checks performed:
+//!
+//! | Module | Representative checks |
+//! |---|---|
+//! | [`dual`] | sin′ = cos, chain rule, powi at zero |
+//! | [`math3`] | i×j = k, det(I) = 1, inv · self = I |
+//! | [`stokes`] | sphere C₂ₘ = 0; oblate C₂₀ = −3/5; triaxial C₂₂ = 3 |
+//! | [`potential`] | order-0 recovers −G·M₁M₂/r and G·M₁M₂/r² force |
+//! | [`dynamics`] | centripetal acceleration = −G(M₁+M₂)/a²; zero torques for n=0 |
+//! | [`orbit`] | vis-viva ½v² = μ/(2a); r·v = 0 at periapsis |
+//! | [`integrators`] | all four integrators produce non-NaN output of correct size |
+//!
+//! ### Python tests — 24 tests (no Rust extension needed)
+//!
+//! ```bash
+//! # from the repo root
+//! python3 -m pytest
+//! ```
+//!
+//! Expected:
+//! ```text
+//! collected 24 items
+//! tests/test_stokes_utils.py::TestCsLabels::test_count_degree2 PASSED
+//! ...
+//! 24 passed in 1.3s
+//! ```
+//!
+//! Filter by class or keyword:
+//! ```bash
+//! python3 -m pytest -k "TestStokesMatrix"
+//! python3 -m pytest -k "oblate_c20"
+//! ```
+//!
+//! `tests/conftest.py` adds `example/` to `sys.path` automatically — no
+//! manual path setup is required.
+//!
+//! ### Rebuild and view the HTML documentation
+//!
+//! ```bash
+//! cd gubas_rs
+//! cargo doc --no-deps --open
+//! # opens: gubas_rs/target/doc/gubas_rs/index.html
+//! ```
+//!
+//! ---
+//!
+//! ## Contributing and Support
+//!
+//! See [`CONTRIBUTING.md`](https://github.com/giovannifereoli/GUBAS-RS/blob/master/CONTRIBUTING.md)
+//! in the repository root for full guidelines.  In brief:
+//!
+//! - **Bug reports** — open a GitHub Issue with a minimal reproducible example.
+//! - **Feature requests** — open an Issue describing the use-case.
+//! - **Pull requests** — fork the repo, create a branch, add tests for any new
+//!   code, run `cargo test` and `python3 -m pytest`, then open a PR against
+//!   `master`.
+//! - **Questions / support** — open a GitHub Discussion or contact the
+//!   maintainer at `giovafere@gmail.com`.
+
 #![allow(dead_code)]
 
 pub mod coefficients;
