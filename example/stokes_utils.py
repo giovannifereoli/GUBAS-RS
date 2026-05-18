@@ -149,7 +149,9 @@ def stokes_matrix(theta_indices, min_degree, max_degree, normalized=False):
 
     M = np.zeros((N_cs, N_theta))
     for r, (l, m, is_sin) in enumerate(rows):
-        pre = 0.5**l * (_norm_factor(l, m) if normalized else 1.0)
+        delta = 1.0 if m == 0 else 0.0
+        unnorm_pre = (2.0 - delta) * factorial(l - m) / factorial(l + m)
+        pre = 0.5**l * unnorm_pre * (_norm_factor(l, m) if normalized else 1.0)
         for k, (ii, jj, kk) in enumerate(theta_indices):
             if is_sin:
                 M[r, k] = pre * _slm_contrib(l, m, ii, jj, kk)

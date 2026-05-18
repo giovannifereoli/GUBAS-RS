@@ -842,14 +842,12 @@ pub fn run_stm_augmented(min_degree: usize, max_degree: usize, which_body: usize
         }
     }
 
-    // Stokes at t₀ — use max semi-axis of body as reference radius
-    let (body_ta, body_mass) = if which_body == 0 {
-        (&params.ta, params.ta.get(0,0,0))
+    // Stokes at t₀
+    let (body_ta, body_mass, r0) = if which_body == 0 {
+        (&params.ta, params.ta.get(0,0,0), params.refrad1)
     } else {
-        (&params.tb, params.tb.get(0,0,0))
+        (&params.tb, params.tb.get(0,0,0), params.refrad2)
     };
-    // Reference radius: rough mean radius from MOI (no explicit r0 in params; use 1 km)
-    let r0 = 1.0_f64; // km — user should rescale in post-processing
     let cs = nijk_to_clm_slm(body_ta, body_mass, r0, max_degree, Normalization::Unnormalized);
     {
         use std::io::Write;
@@ -993,16 +991,16 @@ pub fn run_stm_augmented_both(
         }
     }
 
-    let r0 = 1.0_f64;
-    let cs_a = nijk_to_clm_slm(&params.ta, params.ta.get(0,0,0), r0,
+    let cs_a = nijk_to_clm_slm(&params.ta, params.ta.get(0,0,0), params.refrad1,
                                 max_degree_a, Normalization::Unnormalized);
-    let cs_b = nijk_to_clm_slm(&params.tb, params.tb.get(0,0,0), r0,
+    let cs_b = nijk_to_clm_slm(&params.tb, params.tb.get(0,0,0), params.refrad2,
                                 max_degree_b, Normalization::Unnormalized);
     {
         use std::io::Write;
         let mut f = std::io::BufWriter::new(
             std::fs::File::create(format!("{}/stokes_out.txt", dir)).unwrap());
-        writeln!(f, "# Stokes at t0, r0={:.4} km.  Body A then B.", r0).unwrap();
+        writeln!(f, "# Stokes at t0, r0_A={:.4} km, r0_B={:.4} km.  Body A then B.",
+                 params.refrad1, params.refrad2).unwrap();
         writeln!(f, "# body  l  m  C_lm  S_lm").unwrap();
         for l in 0..=max_degree_a {
             for mm in 0..=l {

@@ -131,14 +131,15 @@ class TestStokesMatrix:
         np.testing.assert_allclose(cs[0], -3.0 / 5.0, atol=1e-14)
 
     def test_triaxial_c22_analytic(self):
-        # C_{22} = 3*(N_{200} - N_{020}) = 3*(9/5 - 4/5) = 3  for a=3, b=2, c=1
+        # C_{22} = (2-0)*(0!/4!) * (1/4)*12*(a²-b²)/5 = (a²-b²)/20
+        # For a=3, b=2: (9-4)/20 = 0.25
         idx = _theta_indices(2, 2)
         T_d = {(0,0,0):1.0, (2,0,0):9/5, (0,2,0):4/5, (0,0,2):1/5,
                (1,1,0):0, (1,0,1):0, (0,1,1):0}
         N = _N_vec(T_d, idx)
         cs = stokes_matrix(idx, 2, 2) @ N
         c22_idx = cs_labels(2, 2).index("C22")
-        np.testing.assert_allclose(cs[c22_idx], 3.0, atol=1e-13)
+        np.testing.assert_allclose(cs[c22_idx], (9 - 4) / 20.0, atol=1e-13)
 
     def test_s_lm_zero_for_aligned_body(self):
         # No cross-terms → all S_{lm} = 0

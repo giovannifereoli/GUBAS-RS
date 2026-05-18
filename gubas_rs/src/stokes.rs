@@ -105,7 +105,10 @@ pub fn nijk_to_clm_slm(
         let _ = pre_l; // computed per (l,m) below
 
         for m in 0..=l {
-            let factor = (0.5_f64).powi(l as i32) * norm_factor(l, m, norm);
+            let delta = if m == 0 { 1.0 } else { 0.0 };
+            let factor = (0.5_f64).powi(l as i32)
+                * (2.0 - delta) * factorial(l - m) / factorial(l + m)
+                * norm_factor(l, m, norm);
 
             // ── C_lm (Tricarico Eq. 16) ─────────────────────────────────────
             let mut c_sum = 0.0;
@@ -418,8 +421,8 @@ mod tests {
         ta.set(0, 2, 0, mass * b * b / 5.0);
         ta.set(0, 0, 2, mass * c * c / 5.0);
         let cs = nijk_to_clm_slm(&ta, mass, 1.0, 2, Normalization::Unnormalized);
-        // Expected: 3*(a²/5 - b²/5) = 3*(9-4)/5 = 3
-        let expected_c22 = 3.0 * (a * a - b * b) / 5.0;
+        // C_22 = (2-0)*(0!/4!) * (1/4)*12*(a²-b²)/5 = (a²-b²)/20
+        let expected_c22 = (a * a - b * b) / 20.0;
         close(cs.c[2][2], expected_c22, 1e-14);
         // S22 = 0 for a body aligned with principal axes
         close(cs.s[2][2], 0.0, 1e-14);
