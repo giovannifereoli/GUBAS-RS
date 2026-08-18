@@ -625,7 +625,7 @@ If using the flyby or heliocentric perturbation:
 
 MIT License
 
-Copyright (c) 2024 Giovanni Fereoli
+Copyright (c) 2026 Giovanni Fereoli
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
 
@@ -638,11 +638,6 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 ## Errata
 
 User Guide Eq. 9: the provided definition of the inertia integrals is mass-normalised; the code and subsequent equations use the non-normalised form.
-
----
-
-A JOSS paper (`paper.md` / `paper.bib`) is included in the repository root for formal
-software citation.
 
 ---
 
