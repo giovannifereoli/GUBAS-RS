@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["IDENTITY","ZERO_M","ZERO_V"],"fn":["add_m","add_v","col","cross","det3","diag","dot","eye","frob_norm","inf_norm_30","inf_norm_v","inv3","mat_mul","mat_vec","norm","scale_m","scale_v","state_add_scaled","state_combine","state_sub","sub_m","sub_v","tilde","trace","transpose","zero_m","zero_v"],"trait":["Scalar"],"type":["Mat3","Vec3"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["a_calc","b_calc","coeff_vec_len","factorial","ifact","t_ind","tk_calc"]};
