@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["de_dx","du_c","du_dc_tilde","du_dx_tilde","du_x","map_potential_partials_rhs","potential","u_tilde"]};

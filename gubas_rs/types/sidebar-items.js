@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["check_theta_indices","promote_params","second_moment_to_inertia"],"struct":["Cube","Initialization","Params"]};
