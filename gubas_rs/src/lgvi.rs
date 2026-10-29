@@ -246,12 +246,12 @@ pub fn hamiltonian_map(
     let ib = params.ib;
 
     // ── inertia tensors (normalised) ─────────────────────────────────────
-    // IH  = diag(IA) / (nm·nr²)
-    let ih  : Mat3 = scale_m(1.0 / alpha, diag(ia));
-    // IBr = C · diag(IB) · Cᵀ / (nm·nr²)
+    // IH  = IA / (nm·nr²)
+    let ih  : Mat3 = scale_m(1.0 / alpha, ia);
+    // IBr = C · IB · Cᵀ / (nm·nr²)
     let ibr : Mat3 = scale_m(
         1.0 / alpha,
-        mat_mul(mat_mul(c, diag(ib)), transpose(c)),
+        mat_mul(mat_mul(c, ib), transpose(c)),
     );
 
     // ── relative-attitude Cayley solve (secondary body B) ────────────────
@@ -295,7 +295,7 @@ pub fn hamiltonian_map(
     // ── propagate primary angular velocity ───────────────────────────────
     // wc_n1 = IH⁻¹ · ( Fnaᵀ·(IH·wc + h/2·cross(r,du_dr_norm) + h/2·M_norm)
     //                  + h/2·cross(r_n1,du_dr_n1_norm) + h/2·M_n1_norm )
-    // IH⁻¹  = alpha · diag(1/IA)
+    // IH⁻¹  = alpha · IA⁻¹
     let wc_bracket = add_v(
         add_v(mat_vec(ih, wc),
               scale_v(h_n / 2.0, cross(r, du_dr_norm))),
@@ -306,12 +306,12 @@ pub fn hamiltonian_map(
               scale_v(h_n / 2.0, cross(r_n1, du_dr_n1_norm))),
         scale_v(h_n / 2.0, m_n1_norm),
     );
-    let ih_inv: Mat3 = scale_m(alpha, diag([1.0/ia[0], 1.0/ia[1], 1.0/ia[2]]));
+    let ih_inv: Mat3 = scale_m(alpha, inv3(ia));
     let wc_n1: Vec3  = mat_vec(ih_inv, wc_rhs);
 
     // ── propagate secondary angular velocity ─────────────────────────────
     // ws_n1 = C_n1·(IB/α)⁻¹·C_n1ᵀ · ( Fnaᵀ·(IBr·ws − h/2·M_norm) − h/2·M_n1_norm )
-    // (IB/α)⁻¹ expressed in A-frame = α · C_n1·diag(1/IB)·C_n1ᵀ
+    // (IB/α)⁻¹ expressed in A-frame = α · C_n1·IB⁻¹·C_n1ᵀ
     let ws_bracket = sub_v(mat_vec(ibr, ws), scale_v(h_n / 2.0, m_norm));
     let ws_rhs = sub_v(
         mat_vec(transpose(fna), ws_bracket),
@@ -319,7 +319,7 @@ pub fn hamiltonian_map(
     );
     let ib_inv_rot: Mat3 = scale_m(
         alpha,
-        mat_mul(mat_mul(c_n1, diag([1.0/ib[0], 1.0/ib[1], 1.0/ib[2]])), transpose(c_n1)),
+        mat_mul(mat_mul(c_n1, inv3(ib)), transpose(c_n1)),
     );
     let ws_n1: Vec3 = mat_vec(ib_inv_rot, ws_rhs);
 
@@ -374,8 +374,8 @@ mod tests {
         let mut p = Params {
             g, m: m_red, nu,
             ta, tb,
-            ia: [1.0, 1.0, 1.0],
-            ib: [1.0, 1.0, 1.0],
+            ia: eye(),
+            ib: eye(),
             n, tk: tk_calc(n), a: a_calc(n), b: b_calc(n),
             flyby_toggle: 0, helio_toggle: 0, sg_toggle: 0, tt_toggle: 0,
             mplanet: 0.0,

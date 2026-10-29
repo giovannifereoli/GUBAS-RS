@@ -59,7 +59,7 @@ gubas_RUST/
 │   ├── Didymos_A_facet.csv     Primary shape model — tetrahedra
 │   ├── Didymos_A_vert_met.csv  Primary shape model — vertices (metres)
 │   ├── TDP_4.csv / TDS_4.csv   Precomputed inertia integrals (order 4)
-│   ├── IDP.csv / IDS.csv       Principal moments of inertia
+│   ├── IDP.csv / IDS.csv       Inertia tensors (3 principal moments or 9 entries)
 │   ├── stokes_utils.py         Stokes matrix + pseudoinverse + conversion utilities
 │   ├── run_example.py          Basic trajectory example
 │   ├── run_example_OD.py       STM propagation + OD-style interface
@@ -119,7 +119,7 @@ python -c "import gubas_rs; print('ok')"
 
 ## Testing
 
-### Rust unit tests — 108 tests across all 11 modules
+### Rust unit tests — 121 tests across all 11 modules
 
 ```bash
 cd gubas_rs
@@ -129,7 +129,7 @@ cargo test
 Expected output:
 
 ```
-test result: ok. 108 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 121 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 ```
 
 Every module is covered with analytic reference checks:
@@ -140,11 +140,11 @@ Every module is covered with analytic reference checks:
 | `dual.rs` | 16 | Product/quotient/chain rules; sin, cos, exp, ln, sqrt, powi, tan, tanh, sinh derivatives |
 | `math3.rs` | 17 | i×j=k, anticommutativity, tilde↔cross, mat_mul, transpose, det, inv3, norm, trace |
 | `stokes.rs` | 12 | `inertia_indices` count; label ordering; C₀₀=1; sphere C₂ₘ=0; oblate C₂₀=−3/5; triaxial C₂₂ analytic; M·N = direct `nijk_to_clm_slm` |
-| `inertia.rs` | 8 | Ellipsoid mass, T₂₀₀/T₀₂₀/T₀₀₂ analytic, MOI formulas; sphere moments equal; q_ijk symmetry |
+| `inertia.rs` | 9 | Ellipsoid mass, T₂₀₀/T₀₂₀/T₀₀₂ analytic, MOI formulas; sphere moments equal; q_ijk symmetry; inertia CSV accepts 3 moments or a symmetric 9-entry tensor |
 | `potential.rs` | 7 | `de_dx` diagonal/off-diagonal; monopole U=−GM₁M₂/r; monopole force = GM₁M₂/r²; transverse force = 0 |
 | `orbit.rs` | 8 | Kepler's equation at periapsis/quarter/half period; `kepler2cart` circular |r|=a, r·v=0, vis-viva; periapsis radius |
-| `types.rs` | 9 | `Cube<T>` new/set/get/add/zeros/extremes/order; `compute_lgvi_inertia` diagonal formula, equal moments |
-| `dynamics.rs` | 2 | Point-mass centripetal acceleration = −G(M₁+M₂)/r²; zero torques for n=0 |
+| `types.rs` | 19 | `Cube<T>` new/set/get/add/zeros/extremes/order; `compute_lgvi_inertia`; `ic_input.txt` parsing and error messages; generate→load round trip; cube order check; ellipsoid T_{ijk} imply its inertia; `with_theta` updates inertia and masses; degree checks |
+| `dynamics.rs` | 4 | Point-mass centripetal acceleration = −G(M₁+M₂)/r²; zero torques for n=0; free rotation with products of inertia conserves energy and \|L\|; AD ∂ẋ/∂T₂₀₀ matches FD through both potential and inertia |
 | `lgvi.rs` | 3 | Outer product values and antisymmetry; monopole radial force via `map_partials` |
 | `integrators.rs` | 4 | RK4, ABM, RK7(8), LGVI each produce non-NaN output of correct size |
 | `stm.rs` | 2 | AD Jacobian exact to machine eps; max\|AD−FD\| < 1e-5 |
@@ -207,8 +207,8 @@ All runs read `ic_input.txt` from the **current working directory**. The file is
 7200.0            # tf (s)
 TDP_4.csv         # primary inertia integrals CSV (read or written)
 TDS_4.csv         # secondary inertia integrals CSV
-IDP.csv           # primary principal moments of inertia CSV
-IDS.csv           # secondary principal moments of inertia CSV
+IDP.csv           # primary inertia: 3 principal moments or 9 tensor entries
+IDS.csv           # secondary inertia: 3 principal moments or 9 tensor entries
 Didymos_A_facet.csv    # primary polyhedron facets (only if a_shape=2)
 Didymos_A_vert_met.csv # primary polyhedron vertices in metres
 Didymos_B_facet.csv    # secondary polyhedron facets (only if b_shape=2)
@@ -255,7 +255,7 @@ Didymos_B_vert_met.csv # secondary polyhedron vertices
 
 ### Inertia integrals: generate vs load
 
-Set `tgen = 1` on the first run to compute T_{ijk} from the body model (ellipsoid or polyhedron) and save them to `TDP_{N}.csv` / `TDS_{N}.csv`. On subsequent runs set `tgen = 0` to load the cached CSV directly — this is much faster.
+Set `tgen = 1` on the first run to compute T_{ijk} from the body model (ellipsoid or polyhedron) and save them to the two inertia-integral files named in `ic_input.txt` (`TDP_4.csv` / `TDS_4.csv` above). On subsequent runs set `tgen = 0` to load the cached CSV directly — this is much faster. Loading checks that each cube was generated to at least the expansion order and asks you to regenerate it otherwise.
 
 For the **polyhedron** case (`a_shape = 2` or `b_shape = 2`), provide the facet and vertex CSV files. The code tetrahedralizes the volume and numerically integrates ∫ x^i y^j z^k dm. For **ellipsoid** (`a_shape = 1`), the analytic closed form is used.
 
@@ -291,8 +291,8 @@ The 30-element state vector in **A-frame** (primary body frame):
 
 | Toggle | Effect |
 |--------|--------|
-| `flyby_toggle = 1` | 3rd body on a hyperbolic trajectory (e.g. Earth flyby). Adds tidal orbital acceleration and gravitational torques on both bodies. Parameters: `mplanet`, `a_hyp` (< 0), `e_hyp`, `i_hyp`, `raan_hyp`, `om_hyp`, `tau_hyp`. |
-| `helio_toggle = 1` | Sun on a heliocentric elliptic orbit. Same tidal structure as flyby. For long timescale runs. |
+| `flyby_toggle = 1` | 3rd body on a hyperbolic trajectory (e.g. Earth flyby). Adds the tidal orbital acceleration. The third-body torques on the two bodies are computed but not applied to ω̇, as in the original C++ GUBAS (`hou_cpp.cpp`). Parameters: `mplanet`, `a_hyp` (< 0), `e_hyp`, `i_hyp`, `raan_hyp`, `om_hyp`, `tau_hyp`. |
+| `helio_toggle = 1` | Sun on a heliocentric elliptic orbit. Same tidal structure as flyby (orbital acceleration only; solar torques are not applied). For long timescale runs. |
 | `sg_toggle = 1` | Legacy Hill-equation solar gravity (circular orbit approximation). |
 | `tt_toggle = 1` | Maxwell viscoelastic tidal torques (Mignard-style). Parameters: Love numbers, reference radii, lag angles. |
 
@@ -334,6 +334,10 @@ rhs = model.eval_augmented(xphi.tolist(), t)   # [ẋ; Φ̇] for solve_ivp
 ### Augmented STM — parameter sensitivity for both bodies
 
 The augmented state is **z = [x(30); θ_a(N_a); θ_b(N_b)]** where θ_a and θ_b are the inertia integral vectors T_{ijk} of the primary and secondary at the requested harmonic degrees.  θ̇ = 0 (parameters are constant); the augmented STM Φ_aug propagates ∂x/∂θ_a and ∂x/∂θ_b alongside the trajectory.
+
+The degree-2 integrals are the second moments of the mass distribution, so they also fix each body's inertia tensor, I = tr(J)·E − J with J_pq = T(e_p + e_q). Since version 0.2.0 the inertia tensors, the masses (T₀₀₀) and the derived mass ratios move with θ, so ∂ω̇/∂θ includes the change of the inertia tensor, not only the change of the mutual potential. Degree-1 integrals (first moments) are rejected: the body frame is centred on the centre of mass, so they are zero by construction.
+
+All entry points accept an optional `work_dir` argument: the directory holding `ic_input.txt` and the files it names (default: the current directory).
 
 ```python
 import gubas_rs, numpy as np
@@ -458,15 +462,14 @@ The conversion uses the right pseudoinverse M⁺ = Mᵀ(MMᵀ)⁻¹ of the Stoke
 This is the minimal script to get trajectory + full C/S partials for both bodies, ready to plug into an OD filter:
 
 ```python
-import gubas_rs, numpy as np, os
+import gubas_rs, numpy as np
 from stokes_utils import convert_phi_xt_to_cs, cs_labels
 
-os.chdir("example/")   # ic_input.txt must be in cwd
-
-# 1. Build model
+# 1. Build model from example/ic_input.txt and the files it names
 model = gubas_rs.AugmentedDynamicsModel(
     min_degree_a=2, max_degree_a=2,
     min_degree_b=2, max_degree_b=2,
+    work_dir="example/",
 )
 N_AUG = model.n_aug       # 42
 N_A   = model.n_theta_a   # 6
@@ -517,6 +520,8 @@ A_aug = np.array(A_flat).reshape(N_AUG, N_AUG)
 ---
 
 ## Output files
+
+The `run*` functions write their output under `work_dir` (the current directory by default).
 
 ### Trajectory only (`run()`)
 
