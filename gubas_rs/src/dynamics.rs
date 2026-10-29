@@ -118,15 +118,15 @@ fn md_tidal_torque<T: Scalar>(
     let g1 = to_t(lf1 * (2.0 * params.eps1).sin()) * params.g * mc * mc * ms * ms / r6;
     let g2 = to_t(lf2 * (2.0 * params.eps2).sin()) * params.g * mc * mc * ms * ms / r6;
 
-    let del1 = g1 * (to_t(6.0) / (pi * params.g * to_t(params.rho_a))).sqrt() / params.ia[2];
-    let del2 = g2 * (to_t(6.0) / (pi * params.g * to_t(params.rho_b))).sqrt() / params.ib[2];
+    let del1 = g1 * (to_t(6.0) / (pi * params.g * to_t(params.rho_a))).sqrt() / params.ia[2][2];
+    let del2 = g2 * (to_t(6.0) / (pi * params.g * to_t(params.rho_b))).sqrt() / params.ib[2][2];
 
     let tt1 = if norm(phid1) > del1.abs() {
         scale_v(g1, mat_vec(transpose(cc), g1_hat))
     } else {
         let f = norm(phid1)
             * (to_t(6.0) / (pi * params.g * to_t(params.rho_a))).powf(to_t(-0.5))
-            * params.ia[2];
+            * params.ia[2][2];
         scale_v(f, mat_vec(transpose(cc), g1_hat))
     };
     let tt2 = if norm(phid2) > del2.abs() {
@@ -134,7 +134,7 @@ fn md_tidal_torque<T: Scalar>(
     } else {
         let f = norm(phid2)
             * (to_t(6.0) / (pi * params.g * to_t(params.rho_b))).powf(to_t(-0.5))
-            * params.ib[2];
+            * params.ib[2][2];
         scale_v(f, mat_vec(transpose(cc), g2_hat))
     };
 
@@ -157,8 +157,8 @@ pub fn hou_ode<T: Scalar>(x: [T; 30], time: f64, p: &Params<T>) -> [T; 30] {
     let r_mag = norm(r).max(to_t(1e-30_f64));
     let e     = scale_v(T::one() / r_mag, r);
 
-    let ic_inv   = diag([T::one() / p.ia[0], T::one() / p.ia[1], T::one() / p.ia[2]]);
-    let is_inv   = diag([T::one() / p.ib[0], T::one() / p.ib[1], T::one() / p.ib[2]]);
+    let ic_inv   = inv3(p.ia);
+    let is_inv   = inv3(p.ib);
     let is_inv_c = mat_mul(mat_mul(c, is_inv), transpose(c));
 
     let wc_tilde = tilde(wc);
@@ -168,6 +168,9 @@ pub fn hou_ode<T: Scalar>(x: [T; 30], time: f64, p: &Params<T>) -> [T; 30] {
     let tbp = inertia_rot(c, p.n, &p.tb);
 
     // ── 3rd-body flyby ────────────────────────────────────────────────────
+    // The third-body torques m_sa / m_sb (and m_suna / m_sunb below) are not
+    // added to ω̇, as in the original hou_cpp.cpp; only the orbital
+    // acceleration enters the equations of motion.
     let (acc_3bp, _m_sa, _m_sb) = if p.flyby_toggle == 1 {
         let g_f64  = p.g.to_f64().unwrap();
         let f0_hyp = kepler(p.n_hyp, time, p.e_hyp, p.tau_hyp);
@@ -273,8 +276,8 @@ pub fn hou_ode<T: Scalar>(x: [T; 30], time: f64, p: &Params<T>) -> [T; 30] {
     });
 
     // ── angular momenta ───────────────────────────────────────────────────
-    let la = mat_vec(diag(p.ia), wc);
-    let lb = mat_vec(c, mat_vec(diag(p.ib), ws_s));
+    let la = mat_vec(p.ia, wc);
+    let lb = mat_vec(c, mat_vec(p.ib, ws_s));
 
     // ── torques ───────────────────────────────────────────────────────────
     let mb = scale_v(-T::one(), add_v(add_v(
@@ -298,8 +301,8 @@ pub fn hou_ode<T: Scalar>(x: [T; 30], time: f64, p: &Params<T>) -> [T; 30] {
         sub_v(add_v(cross(la, wc), ma), tt_1));
     let wsd = mat_vec(is_inv_c,
         sub_v(sub_v(sub_v(add_v(cross(lb, wc), mb),
-                          mat_vec(mat_mul(cd, diag(p.ib)), mat_vec(transpose(c), ws))),
-                    mat_vec(mat_mul(c, mat_mul(diag(p.ib), cdt)), ws)),
+                          mat_vec(mat_mul(cd, p.ib), mat_vec(transpose(c), ws))),
+                    mat_vec(mat_mul(c, mat_mul(p.ib, cdt)), ws)),
               tt_2));
 
     // ── pack output ───────────────────────────────────────────────────────
@@ -315,27 +318,48 @@ pub fn hou_ode<T: Scalar>(x: [T; 30], time: f64, p: &Params<T>) -> [T; 30] {
      cd[2][0],  cd[2][1],  cd[2][2]]
 }
 
+// ── augmented_ode ─────────────────────────────────────────────────────────────
+
+/// Right-hand side ż = [ẋ; 0] of the augmented state z = [x(30); θ_a; θ_b].
+///
+/// ẋ is [`hou_ode`] with the inertia integrals at `idx_a` (primary) and
+/// `idx_b` (secondary) set to the θ values in z, together with the masses and
+/// inertia tensors they imply (see [`Params::with_theta`]).  The θ entries are
+/// constant, so their rates are zero.
+pub fn augmented_ode<T: Scalar>(
+    z: &[T], time: f64, base: &Params<T>,
+    idx_a: &[(usize, usize, usize)], idx_b: &[(usize, usize, usize)],
+) -> Vec<T> {
+    assert_eq!(z.len(), 30 + idx_a.len() + idx_b.len(), "z = [x(30); θ_a; θ_b]");
+    let (x, theta) = z.split_at(30);
+    let (theta_a, theta_b) = theta.split_at(idx_a.len());
+    let p = base.with_theta(idx_a, theta_a, idx_b, theta_b);
+    let mut zdot = hou_ode(x.try_into().unwrap(), time, &p).to_vec();
+    zdot.resize(z.len(), T::zero());
+    zdot
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
-    use super::hou_ode;
+    use super::{augmented_ode, hou_ode};
     use crate::coefficients::{a_calc, b_calc, tk_calc};
-    use crate::types::{Cube, Params};
+    use crate::dual::Dual;
+    use crate::inertia::ell_mass_params_met;
+    use crate::math3::*;
+    use crate::types::{promote_params, Cube, Params};
 
-    /// Minimal Params for monopole (n=0) with all perturbations disabled.
-    fn point_mass_params(ma: f64, mb: f64) -> Params {
-        let g     = 6.674e-20_f64;
-        let m_red = ma * mb / (ma + mb);
-        let nu    = mb / (ma + mb);
-        let n     = 0_usize;
-        let mut ta = Cube::new(n);  ta.set(0, 0, 0, ma);
-        let mut tb = Cube::new(n);  tb.set(0, 0, 0, mb);
+    /// Params with the given integrals and inertia tensors, all
+    /// perturbations disabled.  The expansion order is that of `ta`.
+    fn make_params(ta: Cube, tb: Cube, ia: Mat3, ib: Mat3) -> Params {
+        let g  = 6.674e-20_f64;
+        let ma = ta.get(0, 0, 0);
+        let mb = tb.get(0, 0, 0);
+        let n  = ta.order;
         let mut p = Params {
-            g, m: m_red, nu,
-            ta, tb,
-            ia: [1.0, 1.0, 1.0],
-            ib: [1.0, 1.0, 1.0],
+            g, m: ma * mb / (ma + mb), nu: mb / (ma + mb),
+            ta, tb, ia, ib,
             n, tk: tk_calc(n), a: a_calc(n), b: b_calc(n),
             flyby_toggle: 0, helio_toggle: 0, sg_toggle: 0, tt_toggle: 0,
             mplanet: 0.0,
@@ -353,6 +377,13 @@ mod tests {
         };
         p.compute_lgvi_inertia();
         p
+    }
+
+    /// Minimal Params for monopole (n=0) with all perturbations disabled.
+    fn point_mass_params(ma: f64, mb: f64) -> Params {
+        let mut ta = Cube::new(0);  ta.set(0, 0, 0, ma);
+        let mut tb = Cube::new(0);  tb.set(0, 0, 0, mb);
+        make_params(ta, tb, eye(), eye())
     }
 
     /// Build state with r=[a,0,0], v=[0,v,0], wc=ws=0, Cc=C=I
@@ -411,6 +442,102 @@ mod tests {
         for i in 12..30 {
             assert!(xd[i].abs() < 1e-30,
                     "xd[{i}] = {:.6e} should be 0 (wc = ws = 0)", xd[i]);
+        }
+    }
+
+    #[test]
+    fn hou_ode_free_rotation_with_products_of_inertia() {
+        // No torques (n = 0): ω̇ = I⁻¹((Iω) × ω) for a body spinning alone.
+        // With products of inertia ω is not principal, so ω̇ ≠ 0, but the
+        // rotational energy ½ω·Iω and |Iω|² are conserved: ω·Iω̇ = 0 and
+        // (Iω)·Iω̇ = 0.  Only one body spins at a time, so that with ωc = 0 the
+        // A frame does not rotate and ω̇s is an inertial rate too.
+        let inertia = [[2.0, 0.3, -0.1], [0.3, 3.0, 0.2], [-0.1, 0.2, 4.0]];
+        let mut ta = Cube::new(0);  ta.set(0, 0, 0, 5.0e11);
+        let mut tb = Cube::new(0);  tb.set(0, 0, 0, 2.0e11);
+        let p = make_params(ta, tb, inertia, inertia);
+        let w = [1.0e-4, -2.0e-4, 3.0e-4];
+        for (body, range) in [("primary", 6..9), ("secondary", 9..12)] {
+            let mut x = circular_state(10.0, 0.0);
+            x[range.clone()].copy_from_slice(&w);
+            let xd = hou_ode(x, 0.0, &p);
+            let wd: Vec3 = xd[range].try_into().unwrap();
+            let (l, ld) = (mat_vec(inertia, w), mat_vec(inertia, wd));
+            let scale = norm(l) * norm(w) * norm(w);
+            assert!(norm(wd) > 1e-3 * norm(w) * norm(w), "{body}: ω̇ = 0");
+            assert!(dot(w, ld).abs() < 1e-14 * scale, "{body}: energy not conserved");
+            assert!(dot(l, ld).abs() < 1e-14 * scale * norm(l) / norm(w), "{body}: |L| not conserved");
+        }
+    }
+
+    #[test]
+    fn augmented_ode_partial_includes_inertia_path() {
+        // ∂ẋ/∂T_200 of each body by AD through augmented_ode against a central
+        // difference of hou_ode on an ellipsoid whose T_200 and inertia both
+        // change.  Iyy = T_200 + T_002 and Izz = T_200 + T_020, so
+        // ∂I/∂T_200 = diag(0, 1, 1).
+        let (ia, ta) = ell_mass_params_met(2, 2, 2e12, 400.0, 390.0, 370.0);
+        let (ib, tb) = ell_mass_params_met(2, 2, 2e12, 90.0, 70.0, 60.0);
+        let p = make_params(ta, tb, diag(ia), diag(ib));
+
+        let rot = |axis: usize, a: f64| {
+            let (s, c) = a.sin_cos();
+            let (i, j) = ((axis + 1) % 3, (axis + 2) % 3);
+            let mut m = IDENTITY;
+            m[i][i] = c;  m[i][j] = -s;  m[j][i] = s;  m[j][j] = c;
+            m
+        };
+        let c = mat_mul(rot(2, 0.3), rot(0, 0.2));
+        let mut x = circular_state(0.0, 0.0);
+        x[0..12].copy_from_slice(&[1.0, 0.6, 0.3,  1e-5, 1.5e-4, -2e-5,
+                                   1e-5, 2e-5, 7.7e-4,  -3e-5, 1e-5, 1.4e-4]);
+        for r in 0..3 { x[21 + 3 * r..24 + 3 * r].copy_from_slice(&c[r]); }
+
+        let max_abs = |v: &[f64]| v.iter().fold(0.0_f64, |m, u| m.max(u.abs()));
+        let max_diff = |a: &[f64], b: &[f64]| max_abs(&a.iter().zip(b).map(|(u, v)| u - v).collect::<Vec<_>>());
+        let pd = promote_params::<Dual>(&p);
+        for secondary in [false, true] {
+            let t200 = if secondary { p.tb.get(2, 0, 0) } else { p.ta.get(2, 0, 0) };
+            let mut z: Vec<Dual> = x.iter().map(|&v| Dual::from_re(v)).collect();
+            z.push(Dual::new(t200, 1.0));
+            let (idx_a, idx_b): (&[_], &[_]) =
+                if secondary { (&[], &[(2, 0, 0)]) } else { (&[(2, 0, 0)], &[]) };
+            let ad: Vec<f64> = augmented_ode(&z, 0.0, &pd, idx_a, idx_b)
+                .iter().map(|d| d.eps).collect();
+            assert_eq!(ad.len(), 31);
+            assert_eq!(ad[30], 0.0);
+
+            let h = 1e-4 * t200;
+            let fd = |with_inertia: bool| -> Vec<f64> {
+                let shifted = |s: f64| {
+                    let mut q = p.clone();
+                    let dj = if with_inertia { diag([0.0, s, s]) } else { ZERO_M };
+                    if secondary {
+                        q.tb.set(2, 0, 0, t200 + s);
+                        q.ib = add_m(q.ib, dj);
+                    } else {
+                        q.ta.set(2, 0, 0, t200 + s);
+                        q.ia = add_m(q.ia, dj);
+                    }
+                    hou_ode(x, 0.0, &q)
+                };
+                let (up, down) = (shifted(h), shifted(-h));
+                (0..30).map(|i| (up[i] - down[i]) / (2.0 * h)).collect()
+            };
+            let (full, potential_only) = (fd(true), fd(false));
+            let body = if secondary { "secondary" } else { "primary" };
+            // Errors relative to the largest entry of the same units, so that
+            // entries that vanish analytically (the torque on one body at
+            // order 2 does not see the other's degree-2 integrals) are judged
+            // against the scale of the column, not against their own roundoff.
+            let (v_size, w_size) = (max_abs(&full[3..6]), max_abs(&full[6..12]));
+            for (name, range, size) in [("v̇", 3..6, v_size), ("ω̇_A", 6..9, w_size), ("ω̇_B", 9..12, w_size)] {
+                let err = max_diff(&ad[range.clone()], &full[range]) / size;
+                assert!(err < 1e-6, "{body} T_200, {name}: AD vs FD relative error {err:.2e}");
+            }
+            // The inertia path is a visible part of the body's own ω̇.
+            let own = if secondary { 9..12 } else { 6..9 };
+            assert!(max_diff(&potential_only[own.clone()], &full[own]) / w_size > 1e-3, "{body}");
         }
     }
 }

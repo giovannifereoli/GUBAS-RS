@@ -5,7 +5,7 @@
 
 use crate::coefficients::ifact;
 use crate::math3::{Mat3, Scalar, Vec3, det3};
-use crate::types::Cube;
+use crate::types::{invalid_data, read_text, Cube};
 use num_traits::NumCast;
 
 // ── Q_ijk ─────────────────────────────────────────────────────────────────────
@@ -376,14 +376,40 @@ pub fn save_moi_csv(ia: Vec3, path: &str) -> std::io::Result<()> {
     writeln!(f, "{:.16e},{:.16e},{:.16e}", ia[0], ia[1], ia[2])
 }
 
-/// Load a moment-of-inertia vector from CSV.
+/// Read the comma- or newline-separated numbers in a CSV file.
+fn read_csv_values(path: &str) -> std::io::Result<Vec<f64>> {
+    read_text(path)?
+        .split([',', '\n'])
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(|t| t.parse().map_err(|e| invalid_data(path, format!("cannot parse {t:?} ({e})"))))
+        .collect()
+}
+
+/// Load a moment-of-inertia vector [Ixx, Iyy, Izz] from CSV.
 pub fn load_moi_csv(path: &str) -> std::io::Result<Vec3> {
-    let s = std::fs::read_to_string(path)?;
-    let v: Vec<f64> = s.split(|c| c == ',' || c == '\n')
-        .filter(|t| !t.trim().is_empty())
-        .map(|t| t.trim().parse().unwrap_or(0.0))
-        .collect();
-    Ok([v[0], v[1], v[2]])
+    let v = read_csv_values(path)?;
+    <[f64; 3]>::try_from(v.as_slice())
+        .map_err(|_| invalid_data(path, format!("expected 3 moments of inertia, found {} values", v.len())))
+}
+
+/// Load an inertia tensor from CSV: either the three principal moments
+/// [Ixx, Iyy, Izz] (written by [`save_moi_csv`]), which give a diagonal
+/// tensor, or all nine entries row by row.
+pub fn load_inertia_csv(path: &str) -> std::io::Result<Mat3> {
+    let v = read_csv_values(path)?;
+    match v.len() {
+        3 => Ok(crate::math3::diag([v[0], v[1], v[2]])),
+        9 => {
+            let i = [[v[0], v[1], v[2]], [v[3], v[4], v[5]], [v[6], v[7], v[8]]];
+            if (0..3).any(|p| (0..3).any(|q| i[p][q] != i[q][p])) {
+                return Err(invalid_data(path, "inertia tensor is not symmetric".into()));
+            }
+            Ok(i)
+        }
+        n => Err(invalid_data(path, format!(
+            "expected 3 moments or 9 tensor entries of inertia, found {n} values"))),
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -501,5 +527,27 @@ mod tests {
         let q210 = q_ijk(2.0, 1.0, 0.0);
         assert!((q012 - q102).abs() < 1e-15);
         assert!((q012 - q210).abs() < 1e-15);
+    }
+
+    // ── Inertia CSV loaders ───────────────────────────────────────────────────
+
+    #[test]
+    fn load_inertia_csv_accepts_moments_or_tensor() {
+        let dir = std::env::temp_dir().join(format!("gubas_rs_{}_inertia_csv", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let load = |name: &str, text: &str| {
+            let path = dir.join(name).to_string_lossy().into_owned();
+            std::fs::write(&path, text).unwrap();
+            load_inertia_csv(&path).map_err(|e| e.to_string())
+        };
+        assert_eq!(load("moi.csv", "1,2,3\n").unwrap(), crate::math3::diag([1.0, 2.0, 3.0]));
+        assert_eq!(load("full.csv", "2,-0.5,0\n-0.5,3,0.1\n0,0.1,4\n").unwrap(),
+                   [[2.0, -0.5, 0.0], [-0.5, 3.0, 0.1], [0.0, 0.1, 4.0]]);
+        assert!(load("asym.csv", "2,-0.5,0\n0.5,3,0\n0,0,4\n").unwrap_err().contains("not symmetric"));
+        assert!(load("four.csv", "1,2,3,4\n").unwrap_err().contains("found 4 values"));
+        assert!(load("nan.csv", "1,x,3\n").unwrap_err().contains("cannot parse"));
+
+        let path = dir.join("full.csv").to_string_lossy().into_owned();
+        assert!(load_moi_csv(&path).is_err());
     }
 }

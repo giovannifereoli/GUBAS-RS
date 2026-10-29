@@ -384,7 +384,7 @@ mod tests {
         let mut p = Params {
             g, m: ma*mb/(ma+mb), nu: mb/(ma+mb),
             ta, tb,
-            ia: [1.0, 1.0, 1.0], ib: [1.0, 1.0, 1.0],
+            ia: crate::math3::eye(), ib: crate::math3::eye(),
             n, tk: tk_calc(n), a: a_calc(n), b: b_calc(n),
             flyby_toggle: 0, helio_toggle: 0, sg_toggle: 0, tt_toggle: 0,
             mplanet: 0.0, a_hyp: -1.0, e_hyp: 1.5,

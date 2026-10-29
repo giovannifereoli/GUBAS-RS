@@ -116,6 +116,7 @@
 //! use gubas_rs::{
 //!     coefficients::{a_calc, b_calc, tk_calc},
 //!     integrators::rk4_stack,
+//!     math3::diag,
 //!     types::{Cube, Params},
 //! };
 //!
@@ -132,8 +133,8 @@
 //! let mut params = Params {
 //!     g, m: ma * mb / (ma + mb), nu: mb / (ma + mb),
 //!     ta, tb,
-//!     ia: [3.01e19, 3.01e19, 3.01e19], // primary MOI (kg·km²)
-//!     ib: [5.0e16,  5.0e16,  5.0e16],  // secondary MOI
+//!     ia: diag([3.01e19, 3.01e19, 3.01e19]), // primary inertia tensor (kg·km²)
+//!     ib: diag([5.0e16,  5.0e16,  5.0e16]),  // secondary inertia tensor
 //!     n, tk: tk_calc(n), a: a_calc(n), b: b_calc(n),
 //!     flyby_toggle: 0, helio_toggle: 0, sg_toggle: 0, tt_toggle: 0,
 //! #   mplanet: 0.0, a_hyp: -1.0, e_hyp: 1.5,
@@ -171,12 +172,13 @@
 //! ```python
 //! import gubas_rs, numpy as np
 //! from stokes_utils import convert_phi_xt_to_cs, cs_labels
-//! import os; os.chdir("example/")  # ic_input.txt must be in cwd
 //!
-//! # 1. Build the augmented model (degree-2 gravity for both bodies)
+//! # 1. Build the augmented model (degree-2 gravity for both bodies) from
+//! #    example/ic_input.txt and the inertia files it names
 //! model = gubas_rs.AugmentedDynamicsModel(
 //!     min_degree_a=2, max_degree_a=2,
 //!     min_degree_b=2, max_degree_b=2,
+//!     work_dir="example/",
 //! )
 //! N_AUG = model.n_aug      # 30 + N_a + N_b  (e.g. 42 for deg-2 both)
 //! theta0 = np.array(model.theta_nominal)
@@ -219,7 +221,7 @@
 //! The test suite verifies every module against analytic reference values —
 //! no floating-point tolerances are loosened beyond what the physics demands.
 //!
-//! ### Rust tests — 108 tests across all 11 modules
+//! ### Rust tests — 121 tests across all 11 modules
 //!
 //! ```bash
 //! cd gubas_rs
@@ -228,10 +230,10 @@
 //!
 //! Expected:
 //! ```text
-//! running 108 tests
+//! running 121 tests
 //! test coefficients::tests::a_calc_n0_monopole ... ok
 //! ...
-//! test result: ok. 108 passed; 0 failed; 0 ignored
+//! test result: ok. 121 passed; 0 failed; 0 ignored
 //! ```
 //!
 //! Filter by module or test name:
@@ -240,7 +242,7 @@
 //! cargo test oblate_c20      # any test whose name contains "oblate_c20"
 //! ```
 //!
-//! Key analytic checks performed (108 tests across all 11 modules):
+//! Key analytic checks performed (121 tests across all 11 modules):
 //!
 //! | Module | Tests | Representative checks |
 //! |---|---:|---|
@@ -248,11 +250,11 @@
 //! | [`dual`] | 16 | sin′ = cos, product/chain/quotient rules, powi at zero |
 //! | [`math3`] | 17 | i×j = k, tilde↔cross, det(I) = 1, inv · self = I, norm, trace |
 //! | [`stokes`] | 12 | sphere C₂ₘ = 0; oblate C₂₀ = −3/5; triaxial C₂₂ = 3; M·N = direct |
-//! | [`inertia`] | 8 | Ellipsoid mass, T₂₀₀/T₀₂₀/T₀₀₂ analytic, sphere MOI equal, q\_ijk symmetry |
+//! | [`inertia`] | 9 | Ellipsoid mass, T₂₀₀/T₀₂₀/T₀₀₂ analytic, sphere MOI equal, q\_ijk symmetry, inertia CSV formats |
 //! | [`potential`] | 7 | order-0 recovers −G·M₁M₂/r and G·M₁M₂/r² force; transverse force = 0 |
 //! | [`orbit`] | 8 | vis-viva; r·v = 0 at periapsis; circular |r| = a |
-//! | [`types`] | 9 | `Cube<T>` set/get/add/zeros; `compute_lgvi_inertia` diagonal formula |
-//! | [`dynamics`] | 2 | centripetal acceleration = −G(M₁+M₂)/r²; zero torques for n=0 |
+//! | [`types`] | 19 | `Cube<T>` set/get/add/zeros; `compute_lgvi_inertia`; `ic_input.txt` and CSV parsing errors; ellipsoid integrals imply its inertia; `with_theta` updates inertia and masses |
+//! | [`dynamics`] | 4 | centripetal acceleration = −G(M₁+M₂)/r²; zero torques for n=0; free rotation with products of inertia conserves energy and \|L\|; AD ∂ẋ/∂T₂₀₀ matches FD through potential and inertia |
 //! | [`lgvi`] | 3 | outer product values and antisymmetry; monopole radial force |
 //! | [`integrators`] | 4 | all four integrators produce non-NaN output of correct size |
 //! | [`stm`] | 2 | AD Jacobian exact to machine eps; max\|AD−FD\| < 1e-5 |
@@ -319,105 +321,33 @@ pub mod stm;
 pub mod stokes;
 pub mod types;
 
-use coefficients::{a_calc, b_calc, tk_calc};
-use inertia::{ell_mass_params_met, load_moi_csv, poly_inertia_met, poly_moi_met, save_moi_csv};
+use std::path::Path;
+
+use dynamics::augmented_ode;
 use integrators::{abm, lgvi_integ, rk4_stack, rk87};
-use types::{Cube, Initialization, Params};
+use types::{check_theta_indices, Initialization, Params};
 
 #[cfg(feature = "extension-module")]
 use pyo3::prelude::*;
 
 // ── ic_read ───────────────────────────────────────────────────────────────────
 
+/// Read `ic_input.txt` from the current working directory.
+///
+/// # Panics
+/// If the file is missing or malformed.  [`Initialization::read`] returns the
+/// error instead.
 pub fn ic_read() -> Initialization {
-    let content = std::fs::read_to_string("ic_input.txt")
-        .expect("ic_input.txt: cannot open input file");
-    let mut lines = content.lines();
+    Initialization::read(Path::new(".")).unwrap_or_else(|e| panic!("{e}"))
+}
 
-    macro_rules! next_line {
-        () => {
-            lines.next().expect("ic_input.txt: unexpected end of file").trim()
-        };
-    }
-    macro_rules! read_f64 { () => { next_line!().parse::<f64>().expect("f64 parse") }; }
-    macro_rules! read_i32 { () => { next_line!().parse::<i32>().expect("i32 parse") }; }
-    macro_rules! read_usize { () => { next_line!().parse::<usize>().expect("usize parse") }; }
-    macro_rules! read_str  { () => { next_line!().to_string() }; }
-
-    let g        = read_f64!();
-    let order    = read_usize!();
-    let order_a  = read_usize!();
-    let order_b  = read_usize!();
-    let a_a      = read_f64!();
-    let b_a      = read_f64!();
-    let c_a      = read_f64!();
-    let a_b      = read_f64!();
-    let b_b      = read_f64!();
-    let c_b      = read_f64!();
-    let a_shape  = read_i32!();
-    let b_shape  = read_i32!();
-    let rho_a    = read_f64!();
-    let rho_b    = read_f64!();
-    let t0       = read_f64!();
-    let tf       = read_f64!();
-    let ta_file  = read_str!();
-    let tb_file  = read_str!();
-    let ia_file  = read_str!();
-    let ib_file  = read_str!();
-    let tet_file_a  = read_str!();
-    let vert_file_a = read_str!();
-    let tet_file_b  = read_str!();
-    let vert_file_b = read_str!();
-    let mut x0 = [0.0_f64; 30];
-    for v in x0.iter_mut() { *v = read_f64!(); }
-    let tgen          = read_i32!();
-    let integ         = read_i32!();
-    let h             = read_f64!();
-    let tol           = read_f64!();
-    let flyby_toggle  = read_i32!();
-    let helio_toggle  = read_i32!();
-    let sg_toggle     = read_i32!();
-    let tt_toggle     = read_i32!();
-    let mplanet       = read_f64!();
-    let a_hyp         = read_f64!();
-    let e_hyp         = read_f64!();
-    let i_hyp         = read_f64!();
-    let raan_hyp      = read_f64!();
-    let om_hyp        = read_f64!();
-    let tau_hyp       = read_f64!();
-    let msolar        = read_f64!();
-    let a_helio       = read_f64!();
-    let e_helio       = read_f64!();
-    let i_helio       = read_f64!();
-    let raan_helio    = read_f64!();
-    let om_helio      = read_f64!();
-    let tau_helio     = read_f64!();
-    let sol_rad       = read_f64!();
-    let au_def        = read_f64!();
-    let love1         = read_f64!();
-    let love2         = read_f64!();
-    let refrad1       = read_f64!();
-    let refrad2       = read_f64!();
-    let eps1          = read_f64!();
-    let eps2          = read_f64!();
-    let msun          = read_f64!();
-
-    Initialization {
-        g, order, order_a, order_b,
-        a_a, b_a, c_a, a_b, b_b, c_b,
-        a_shape, b_shape, rho_a, rho_b,
-        t0, tf,
-        ta_file, tb_file, ia_file, ib_file,
-        tet_file_a, vert_file_a, tet_file_b, vert_file_b,
-        x0,
-        tgen, integ, h, tol,
-        flyby_toggle, helio_toggle, sg_toggle, tt_toggle,
-        mplanet, a_hyp, e_hyp, i_hyp, raan_hyp, om_hyp, tau_hyp,
-        msolar, a_helio, e_helio, i_helio, raan_helio, om_helio, tau_helio,
-        sol_rad, au_def,
-        love1, love2, refrad1, refrad2, eps1, eps2,
-        msun,
-    }
+/// Load the parameters from the inertia files named in `ics`, in the current
+/// working directory, or panic with the reason.
+fn load_params(ics: &Initialization) -> Params<f64> {
+    Params::load(Path::new("."), ics).unwrap_or_else(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => panic!("{e}; run with Tgen = 1 to generate it"),
+        _ => panic!("{e}"),
+    })
 }
 
 // ── run_simulation ────────────────────────────────────────────────────────────
@@ -425,123 +355,18 @@ pub fn ic_read() -> Initialization {
 /// Run a full GUBAS simulation. Reads `ic_input.txt` from the current working
 /// directory and writes binary output to `output_t/t_out.bin` and
 /// `output_x/x_out.bin` in the same directory.
+///
+/// With `Tgen = 1` the inertia integrals and moments are computed from the
+/// body shapes and saved to the files named in `ic_input.txt`; otherwise they
+/// are loaded from those files.
 pub fn run_simulation() {
     let ics = ic_read();
-
-    let mut order   = ics.order;
-    let mut order_a = ics.order_a;
-    let mut order_b = ics.order_b;
-    if ics.a_shape == 2 { order_a = order_a.max(order); }
-    if ics.b_shape == 2 { order_b = order_b.max(order); }
-    order = order.max(order_a).max(order_b);
-
-    let (ia, ta, ib, tb);
-
-    if ics.tgen == 1 {
+    let params = if ics.tgen == 1 {
         println!("Generating Inertia Integrals");
-
-        let (ia_v, ta_v) = match ics.a_shape {
-            0 => ell_mass_params_met(order, 0, ics.rho_a, ics.a_a, ics.b_a, ics.c_a),
-            1 => ell_mass_params_met(order, order_a, ics.rho_a, ics.a_a, ics.b_a, ics.c_a),
-            2 => {
-                let ta_v = poly_inertia_met(order_a, ics.rho_a,
-                                            &ics.tet_file_a, &ics.vert_file_a);
-                let ia_v = poly_moi_met(ics.rho_a, &ics.tet_file_a, &ics.vert_file_a);
-                (ia_v, ta_v)
-            }
-            _ => panic!("Bad Primary Shape Input: a_shape = {}", ics.a_shape),
-        };
-
-        let (ib_v, tb_v) = match ics.b_shape {
-            0 => ell_mass_params_met(order, 0, ics.rho_b, ics.a_b, ics.b_b, ics.c_b),
-            1 => ell_mass_params_met(order, order_b, ics.rho_b, ics.a_b, ics.b_b, ics.c_b),
-            2 => {
-                let tb_v = poly_inertia_met(order_b, ics.rho_b,
-                                            &ics.tet_file_b, &ics.vert_file_b);
-                let ib_v = poly_moi_met(ics.rho_b, &ics.tet_file_b, &ics.vert_file_b);
-                (ib_v, tb_v)
-            }
-            _ => panic!("Bad Secondary Shape Input: b_shape = {}", ics.b_shape),
-        };
-
-        ta_v.save_csv(&format!("TDP_{}.csv", order)).expect("save TDP csv");
-        tb_v.save_csv(&format!("TDS_{}.csv", order)).expect("save TDS csv");
-        save_moi_csv(ia_v, "IDP.csv").expect("save IDP csv");
-        save_moi_csv(ib_v, "IDS.csv").expect("save IDS csv");
-
-        ia = ia_v;  ta = ta_v;
-        ib = ib_v;  tb = tb_v;
+        Params::generate(Path::new("."), &ics).unwrap_or_else(|e| panic!("{e}"))
     } else {
-        ta = Cube::load_csv(&format!("TDP_{}.csv", order))
-            .expect("TDP csv not found — run with Tgen=1 first");
-        tb = Cube::load_csv(&format!("TDS_{}.csv", order))
-            .expect("TDS csv not found — run with Tgen=1 first");
-        ia = load_moi_csv("IDP.csv").expect("IDP csv not found");
-        ib = load_moi_csv("IDS.csv").expect("IDS csv not found");
-    }
-
-    let tk = tk_calc(order);
-    let a  = a_calc(order);
-    let b  = b_calc(order);
-
-    let mc  = ta.get(0, 0, 0);
-    let ms  = tb.get(0, 0, 0);
-    let m   = mc * ms / (mc + ms);
-    let nu  = ms / (mc + ms);
-    let mean_motion = (ics.g * (ics.msun + mc + ms)
-                       / (ics.sol_rad * ics.au_def / 1000.0).powi(3))
-                      .sqrt();
-    let n_hyp   = (ics.g * ics.mplanet / ics.a_hyp.abs().powi(3)).sqrt();
-    let n_helio = (ics.g * ics.msolar  / ics.a_helio.abs().powi(3)).sqrt();
-
-    let mut params = Params {
-        g: ics.g,
-        m,
-        nu,
-        ta,
-        tb,
-        ia,
-        ib,
-        n: order,
-        tk,
-        a,
-        b,
-        flyby_toggle: ics.flyby_toggle,
-        helio_toggle: ics.helio_toggle,
-        sg_toggle:    ics.sg_toggle,
-        tt_toggle:    ics.tt_toggle,
-        mplanet:  ics.mplanet,
-        a_hyp:    ics.a_hyp,
-        e_hyp:    ics.e_hyp,
-        i_hyp:    ics.i_hyp,
-        raan_hyp: ics.raan_hyp,
-        om_hyp:   ics.om_hyp,
-        tau_hyp:  ics.tau_hyp,
-        n_hyp,
-        msolar:    ics.msolar,
-        a_helio:   ics.a_helio,
-        e_helio:   ics.e_helio,
-        i_helio:   ics.i_helio,
-        raan_helio: ics.raan_helio,
-        om_helio:  ics.om_helio,
-        tau_helio: ics.tau_helio,
-        n_helio,
-        sol_rad:  ics.sol_rad,
-        au_def:   ics.au_def,
-        mean_motion,
-        love1:    ics.love1,
-        love2:    ics.love2,
-        refrad1:  ics.refrad1,
-        refrad2:  ics.refrad2,
-        rho_a:    ics.rho_a,
-        rho_b:    ics.rho_b,
-        eps1:     ics.eps1,
-        eps2:     ics.eps2,
-        ida: math3::ZERO_M,
-        idb: math3::ZERO_M,
-        msun: ics.msun,
+        load_params(&ics)
     };
-    params.compute_lgvi_inertia();
 
     println!("Integrating");
     match ics.integ {
@@ -577,56 +402,7 @@ pub fn run_stm() {
     use types::promote_params;
 
     let ics = ic_read();
-
-    let mut order   = ics.order;
-    let mut order_a = ics.order_a;
-    let mut order_b = ics.order_b;
-    if ics.a_shape == 2 { order_a = order_a.max(order); }
-    if ics.b_shape == 2 { order_b = order_b.max(order); }
-    order = order.max(order_a).max(order_b);
-
-    let ta = Cube::load_csv(&format!("TDP_{}.csv", order))
-        .expect("TDP csv not found — run with Tgen=1 first");
-    let tb = Cube::load_csv(&format!("TDS_{}.csv", order))
-        .expect("TDS csv not found — run with Tgen=1 first");
-    let ia = load_moi_csv("IDP.csv").expect("IDP csv not found");
-    let ib = load_moi_csv("IDS.csv").expect("IDS csv not found");
-
-    let tk = tk_calc(order);
-    let a  = a_calc(order);
-    let b  = b_calc(order);
-
-    let mc  = ta.get(0, 0, 0);
-    let ms  = tb.get(0, 0, 0);
-    let m   = mc * ms / (mc + ms);
-    let nu  = ms / (mc + ms);
-    let mean_motion = (ics.g * (ics.msun + mc + ms)
-                       / (ics.sol_rad * ics.au_def / 1000.0).powi(3)).sqrt();
-    let n_hyp   = (ics.g * ics.mplanet / ics.a_hyp.abs().powi(3)).sqrt();
-    let n_helio = (ics.g * ics.msolar  / ics.a_helio.abs().powi(3)).sqrt();
-
-    let mut params = Params {
-        g: ics.g, m, nu, ta, tb, ia, ib,
-        n: order, tk, a, b,
-        flyby_toggle: ics.flyby_toggle,
-        helio_toggle: ics.helio_toggle,
-        sg_toggle:    ics.sg_toggle,
-        tt_toggle:    ics.tt_toggle,
-        mplanet:   ics.mplanet,
-        a_hyp:     ics.a_hyp, e_hyp: ics.e_hyp, i_hyp: ics.i_hyp,
-        raan_hyp:  ics.raan_hyp, om_hyp: ics.om_hyp, tau_hyp: ics.tau_hyp, n_hyp,
-        msolar:    ics.msolar,
-        a_helio:   ics.a_helio, e_helio: ics.e_helio, i_helio: ics.i_helio,
-        raan_helio: ics.raan_helio, om_helio: ics.om_helio, tau_helio: ics.tau_helio, n_helio,
-        sol_rad:     ics.sol_rad, au_def: ics.au_def, mean_motion,
-        love1:     ics.love1, love2: ics.love2,
-        refrad1:   ics.refrad1, refrad2: ics.refrad2,
-        rho_a:     ics.rho_a, rho_b: ics.rho_b,
-        eps1:      ics.eps1, eps2: ics.eps2,
-        ida: math3::ZERO_M, idb: math3::ZERO_M,
-        msun: ics.msun,
-    };
-    params.compute_lgvi_inertia();
+    let params = load_params(&ics);
 
     // promote once — all eps = 0 (params are constants, not differentiated)
     let params_dual = promote_params::<Dual>(&params);
@@ -703,6 +479,10 @@ pub fn run_stm() {
 /// * `min_degree`, `max_degree` — harmonic degree range (e.g. 2, 2 for degree-2 only)
 /// * `which_body`               — 0 = primary T_a,  1 = secondary T_b
 ///
+/// Changing a degree-2 entry also changes the body's inertia tensor in the
+/// rotational equations (see [`Params::with_theta`]), so Φ_xθ includes that
+/// path.  Degree-1 entries are rejected (see [`check_theta_indices`]).
+///
 /// # Output — written to `output_phi_aug/`
 /// * `phi_out.bin`     — Φ_xx (30×30) STM history,   (nsteps, 30, 30) f64 LE
 /// * `phi_xt_out.bin`  — Φ_xθ (30×N) sensitivity,    (nsteps, 30, N)  f64 LE
@@ -718,65 +498,17 @@ pub fn run_stm_augmented(min_degree: usize, max_degree: usize, which_body: usize
     use stokes::{inertia_indices, nijk_to_clm_slm, Normalization};
     use types::promote_params;
 
+    assert!(which_body <= 1, "which_body must be 0 (primary) or 1 (secondary), got {which_body}");
     let ics = ic_read();
-
-    let mut order   = ics.order;
-    let mut order_a = ics.order_a;
-    let mut order_b = ics.order_b;
-    if ics.a_shape == 2 { order_a = order_a.max(order); }
-    if ics.b_shape == 2 { order_b = order_b.max(order); }
-    order = order.max(order_a).max(order_b);
-
-    let ta = Cube::load_csv(&format!("TDP_{}.csv", order))
-        .expect("TDP csv not found — run with Tgen=1 first");
-    let tb = Cube::load_csv(&format!("TDS_{}.csv", order))
-        .expect("TDS csv not found — run with Tgen=1 first");
-    let ia = load_moi_csv("IDP.csv").expect("IDP csv not found");
-    let ib = load_moi_csv("IDS.csv").expect("IDS csv not found");
-
-    let tk = tk_calc(order);
-    let a  = a_calc(order);
-    let b  = b_calc(order);
-
-    let mc = ta.get(0, 0, 0);
-    let ms = tb.get(0, 0, 0);
-    let m  = mc * ms / (mc + ms);
-    let nu = ms / (mc + ms);
-    let mean_motion = (ics.g * (ics.msun + mc + ms)
-                       / (ics.sol_rad * ics.au_def / 1000.0).powi(3)).sqrt();
-    let n_hyp   = (ics.g * ics.mplanet / ics.a_hyp.abs().powi(3)).sqrt();
-    let n_helio = (ics.g * ics.msolar  / ics.a_helio.abs().powi(3)).sqrt();
-
-    let mut params = Params {
-        g: ics.g, m, nu, ta, tb, ia, ib,
-        n: order, tk, a, b,
-        flyby_toggle: ics.flyby_toggle,
-        helio_toggle: ics.helio_toggle,
-        sg_toggle:    ics.sg_toggle,
-        tt_toggle:    ics.tt_toggle,
-        mplanet:   ics.mplanet,
-        a_hyp:     ics.a_hyp, e_hyp: ics.e_hyp, i_hyp: ics.i_hyp,
-        raan_hyp:  ics.raan_hyp, om_hyp: ics.om_hyp, tau_hyp: ics.tau_hyp, n_hyp,
-        msolar:    ics.msolar,
-        a_helio:   ics.a_helio, e_helio: ics.e_helio, i_helio: ics.i_helio,
-        raan_helio: ics.raan_helio, om_helio: ics.om_helio, tau_helio: ics.tau_helio, n_helio,
-        sol_rad: ics.sol_rad, au_def: ics.au_def, mean_motion,
-        love1: ics.love1, love2: ics.love2,
-        refrad1: ics.refrad1, refrad2: ics.refrad2,
-        rho_a: ics.rho_a, rho_b: ics.rho_b,
-        eps1: ics.eps1, eps2: ics.eps2,
-        ida: math3::ZERO_M, idb: math3::ZERO_M,
-        msun: ics.msun,
-    };
-    params.compute_lgvi_inertia();
+    let params = load_params(&ics);
 
     // ── Select θ indices: all T_{ijk} at the requested degrees ───────────────
     let theta_indices = inertia_indices(min_degree, max_degree);
+    check_theta_indices(&theta_indices, params.n).unwrap_or_else(|e| panic!("{e}"));
     let n_theta = theta_indices.len();
 
-    let theta0: Vec<f64> = theta_indices.iter().map(|&(i, j, k)| {
-        if which_body == 0 { params.ta.get(i, j, k) } else { params.tb.get(i, j, k) }
-    }).collect();
+    let body = if which_body == 0 { &params.ta } else { &params.tb };
+    let theta0: Vec<f64> = theta_indices.iter().map(|&(i, j, k)| body.get(i, j, k)).collect();
 
     println!("Augmented STM propagation:");
     println!("  Body: {}, degrees [{}, {}], N_theta = {}",
@@ -784,27 +516,15 @@ pub fn run_stm_augmented(min_degree: usize, max_degree: usize, which_body: usize
              min_degree, max_degree, n_theta);
     println!("  [Each stage: {} dual ODE evals for augmented Jacobian]", 30 + n_theta);
 
-    // ── Promote params to Dual once, stored for cloning in the closure ────────
+    // ── Augmented dual ODE: θ = z[30..] patched into the parameters ──────────
     let params_dual_base = promote_params::<Dual>(&params);
-
-    // ── Build augmented dual ODE closure ─────────────────────────────────────
-    let theta_indices_clone = theta_indices.clone();
-    let aug_ode_dual = move |z: &[Dual], t: f64| -> Vec<Dual> {
-        // Clone base Dual params and patch the θ entries with values from z[30..]
-        let mut pd = params_dual_base.clone();
-        for (k, &(ii, jj, kk)) in theta_indices_clone.iter().enumerate() {
-            if which_body == 0 {
-                pd.ta.set(ii, jj, kk, z[30 + k]);
-            } else {
-                pd.tb.set(ii, jj, kk, z[30 + k]);
-            }
-        }
-        let mut x = [Dual::from_re(0.0); 30];
-        for i in 0..30 { x[i] = z[i]; }
-        let xdot = hou_ode(x, t, &pd);
-        let mut zdot = vec![Dual::from_re(0.0); 30 + theta_indices_clone.len()];
-        for i in 0..30 { zdot[i] = xdot[i]; }
-        zdot
+    let (idx_a, idx_b) = if which_body == 0 {
+        (theta_indices.clone(), Vec::new())
+    } else {
+        (Vec::new(), theta_indices.clone())
+    };
+    let aug_ode_dual = move |z: &[Dual], t: f64| {
+        augmented_ode(z, t, &params_dual_base, &idx_a, &idx_b)
     };
 
     // f64 ODE (trajectory only — theta is constant)
@@ -889,43 +609,13 @@ pub fn run_stm_augmented_both(
     use types::promote_params;
 
     let ics = ic_read();
-
-    let mut order   = ics.order;
-    let mut order_a = ics.order_a;
-    let mut order_b = ics.order_b;
-    if ics.a_shape == 2 { order_a = order_a.max(order); }
-    if ics.b_shape == 2 { order_b = order_b.max(order); }
-    order = order.max(order_a).max(order_b);
-
-    let ta = Cube::load_csv(&format!("TDP_{}.csv", order)).expect("TDP csv not found");
-    let tb = Cube::load_csv(&format!("TDS_{}.csv", order)).expect("TDS csv not found");
-    let ia = load_moi_csv("IDP.csv").expect("IDP csv not found");
-    let ib = load_moi_csv("IDS.csv").expect("IDS csv not found");
-
-    let tk = tk_calc(order); let a = a_calc(order); let b = b_calc(order);
-    let mc = ta.get(0,0,0); let ms = tb.get(0,0,0);
-    let m  = mc * ms / (mc + ms); let nu = ms / (mc + ms);
-    let mean_motion = (ics.g*(ics.msun+mc+ms)/(ics.sol_rad*ics.au_def/1000.0).powi(3)).sqrt();
-    let n_hyp   = (ics.g*ics.mplanet/ics.a_hyp.abs().powi(3)).sqrt();
-    let n_helio = (ics.g*ics.msolar /ics.a_helio.abs().powi(3)).sqrt();
-
-    let mut params = Params {
-        g: ics.g, m, nu, ta, tb, ia, ib, n: order, tk, a, b,
-        flyby_toggle: ics.flyby_toggle, helio_toggle: ics.helio_toggle,
-        sg_toggle: ics.sg_toggle, tt_toggle: ics.tt_toggle,
-        mplanet: ics.mplanet, a_hyp: ics.a_hyp, e_hyp: ics.e_hyp, i_hyp: ics.i_hyp,
-        raan_hyp: ics.raan_hyp, om_hyp: ics.om_hyp, tau_hyp: ics.tau_hyp, n_hyp,
-        msolar: ics.msolar, a_helio: ics.a_helio, e_helio: ics.e_helio, i_helio: ics.i_helio,
-        raan_helio: ics.raan_helio, om_helio: ics.om_helio, tau_helio: ics.tau_helio, n_helio,
-        sol_rad: ics.sol_rad, au_def: ics.au_def, mean_motion,
-        love1: ics.love1, love2: ics.love2, refrad1: ics.refrad1, refrad2: ics.refrad2,
-        rho_a: ics.rho_a, rho_b: ics.rho_b, eps1: ics.eps1, eps2: ics.eps2,
-        ida: math3::ZERO_M, idb: math3::ZERO_M, msun: ics.msun,
-    };
-    params.compute_lgvi_inertia();
+    let params = load_params(&ics);
 
     let theta_indices_a = inertia_indices(min_degree_a, max_degree_a);
     let theta_indices_b = inertia_indices(min_degree_b, max_degree_b);
+    for (label, idx) in [("primary", &theta_indices_a), ("secondary", &theta_indices_b)] {
+        check_theta_indices(idx, params.n).unwrap_or_else(|e| panic!("{label}: {e}"));
+    }
     let n_a = theta_indices_a.len();
     let n_b = theta_indices_b.len();
     let n_theta = n_a + n_b;
@@ -940,23 +630,9 @@ pub fn run_stm_augmented_both(
     println!("  N_theta = {},  N_aug = {}", n_theta, 30 + n_theta);
 
     let params_dual_base = promote_params::<Dual>(&params);
-    let theta_a_c = theta_indices_a.clone();
-    let theta_b_c = theta_indices_b.clone();
-
-    let aug_ode_dual = move |z: &[Dual], t: f64| -> Vec<Dual> {
-        let mut pd = params_dual_base.clone();
-        for (k, &(ii,jj,kk)) in theta_a_c.iter().enumerate() {
-            pd.ta.set(ii, jj, kk, z[30 + k]);
-        }
-        for (k, &(ii,jj,kk)) in theta_b_c.iter().enumerate() {
-            pd.tb.set(ii, jj, kk, z[30 + n_a + k]);
-        }
-        let mut x = [Dual::from_re(0.0); 30];
-        for i in 0..30 { x[i] = z[i]; }
-        let xdot = hou_ode(x, t, &pd);
-        let mut zdot = vec![Dual::from_re(0.0); 30 + n_a + n_b];
-        for i in 0..30 { zdot[i] = xdot[i]; }
-        zdot
+    let (idx_a, idx_b) = (theta_indices_a.clone(), theta_indices_b.clone());
+    let aug_ode_dual = move |z: &[Dual], t: f64| {
+        augmented_ode(z, t, &params_dual_base, &idx_a, &idx_b)
     };
 
     let ode = |x: [f64; 30], t: f64| hou_ode(x, t, &params);
@@ -1018,24 +694,50 @@ pub fn run_stm_augmented_both(
 
 // ── Python module (only compiled with --features extension-module) ────────────
 
+/// Changes the working directory for the life of the guard and restores the
+/// previous one when dropped, also when the run panics, so a `work_dir`
+/// argument does not leak into the calling Python process.
+#[cfg(feature = "extension-module")]
+struct WorkDir {
+    previous: Option<std::path::PathBuf>,
+}
+
+#[cfg(feature = "extension-module")]
+impl WorkDir {
+    fn enter(dir: Option<&str>) -> PyResult<Self> {
+        let Some(dir) = dir else { return Ok(Self { previous: None }) };
+        let previous = std::env::current_dir()?;
+        std::env::set_current_dir(dir)
+            .map_err(|e| std::io::Error::new(e.kind(), format!("{dir}: {e}")))?;
+        Ok(Self { previous: Some(previous) })
+    }
+}
+
+#[cfg(feature = "extension-module")]
+impl Drop for WorkDir {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take() {
+            let _ = std::env::set_current_dir(previous);
+        }
+    }
+}
+
 /// Run a GUBAS simulation from Python.
 ///
 /// Reads `ic_input.txt` from `work_dir` (defaults to the current working
-/// directory) and writes output binary files to the same location.
+/// directory) and writes output binary files to the same location.  The
+/// working directory is restored afterwards.
 ///
 /// ```python
 /// import gubas_rs
 /// gubas_rs.run()                   # use Python's current working directory
-/// gubas_rs.run("/path/to/run_dir") # change into a specific directory first
+/// gubas_rs.run("/path/to/run_dir") # run in a specific directory
 /// ```
 #[cfg(feature = "extension-module")]
 #[pyfunction]
 #[pyo3(signature = (work_dir=None))]
 fn run(work_dir: Option<&str>) -> PyResult<()> {
-    if let Some(dir) = work_dir {
-        std::env::set_current_dir(dir)
-            .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))?;
-    }
+    let _cwd = WorkDir::enter(work_dir)?;
     run_simulation();
     Ok(())
 }
@@ -1044,10 +746,7 @@ fn run(work_dir: Option<&str>) -> PyResult<()> {
 #[pyfunction]
 #[pyo3(signature = (work_dir=None))]
 fn run_stm_py(work_dir: Option<&str>) -> PyResult<()> {
-    if let Some(dir) = work_dir {
-        std::env::set_current_dir(dir)
-            .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))?;
-    }
+    let _cwd = WorkDir::enter(work_dir)?;
     run_stm();
     Ok(())
 }
@@ -1061,10 +760,11 @@ fn run_stm_augmented_py(
     which_body: usize,
     work_dir:   Option<&str>,
 ) -> PyResult<()> {
-    if let Some(dir) = work_dir {
-        std::env::set_current_dir(dir)
-            .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))?;
+    if which_body > 1 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "which_body must be 0 (primary) or 1 (secondary), got {which_body}")));
     }
+    let _cwd = WorkDir::enter(work_dir)?;
     run_stm_augmented(min_degree, max_degree, which_body);
     Ok(())
 }
@@ -1077,10 +777,7 @@ fn run_stm_augmented_both_py(
     min_degree_b: usize, max_degree_b: usize,
     work_dir: Option<&str>,
 ) -> PyResult<()> {
-    if let Some(dir) = work_dir {
-        std::env::set_current_dir(dir)
-            .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))?;
-    }
+    let _cwd = WorkDir::enter(work_dir)?;
     run_stm_augmented_both(min_degree_a, max_degree_a, min_degree_b, max_degree_b);
     Ok(())
 }
@@ -1112,71 +809,41 @@ pub struct DynamicsModel {
 #[cfg(feature = "extension-module")]
 #[pymethods]
 impl DynamicsModel {
-    /// Create a DynamicsModel from `ic_input.txt` in the current (or given) directory.
+    /// Create a DynamicsModel from `ic_input.txt` and the inertia files it
+    /// names, in `work_dir` (default: the current directory).  The working
+    /// directory of the process is not changed.
     #[new]
     #[pyo3(signature = (work_dir=None))]
     fn new(work_dir: Option<&str>) -> PyResult<Self> {
-        if let Some(dir) = work_dir {
-            std::env::set_current_dir(dir)
-                .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))?;
-        }
-        let ics = ic_read();
-
-        let mut order   = ics.order;
-        let mut order_a = ics.order_a;
-        let mut order_b = ics.order_b;
-        if ics.a_shape == 2 { order_a = order_a.max(order); }
-        if ics.b_shape == 2 { order_b = order_b.max(order); }
-        order = order.max(order_a).max(order_b);
-
-        let ta = Cube::load_csv(&format!("TDP_{}.csv", order))
-            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
-        let tb = Cube::load_csv(&format!("TDS_{}.csv", order))
-            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
-        let ia = load_moi_csv("IDP.csv")
-            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
-        let ib = load_moi_csv("IDS.csv")
-            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
-
-        let tk = tk_calc(order);
-        let a  = a_calc(order);
-        let b  = b_calc(order);
-
-        let mc  = ta.get(0, 0, 0);
-        let ms  = tb.get(0, 0, 0);
-        let m   = mc * ms / (mc + ms);
-        let nu  = ms / (mc + ms);
-        let mean_motion = (ics.g * (ics.msun + mc + ms)
-                           / (ics.sol_rad * ics.au_def / 1000.0).powi(3)).sqrt();
-        let n_hyp   = (ics.g * ics.mplanet / ics.a_hyp.abs().powi(3)).sqrt();
-        let n_helio = (ics.g * ics.msolar  / ics.a_helio.abs().powi(3)).sqrt();
-
-        let mut params = Params {
-            g: ics.g, m, nu, ta, tb, ia, ib,
-            n: order, tk, a, b,
-            flyby_toggle: ics.flyby_toggle,
-            helio_toggle: ics.helio_toggle,
-            sg_toggle:    ics.sg_toggle,
-            tt_toggle:    ics.tt_toggle,
-            mplanet:      ics.mplanet,
-            a_hyp: ics.a_hyp, e_hyp: ics.e_hyp, i_hyp: ics.i_hyp,
-            raan_hyp: ics.raan_hyp, om_hyp: ics.om_hyp, tau_hyp: ics.tau_hyp, n_hyp,
-            msolar:    ics.msolar,
-            a_helio: ics.a_helio, e_helio: ics.e_helio, i_helio: ics.i_helio,
-            raan_helio: ics.raan_helio, om_helio: ics.om_helio, tau_helio: ics.tau_helio, n_helio,
-            sol_rad: ics.sol_rad, au_def: ics.au_def, mean_motion,
-            love1: ics.love1, love2: ics.love2,
-            refrad1: ics.refrad1, refrad2: ics.refrad2,
-            rho_a: ics.rho_a, rho_b: ics.rho_b,
-            eps1: ics.eps1, eps2: ics.eps2,
-            ida: math3::ZERO_M, idb: math3::ZERO_M,
-            msun: ics.msun,
-        };
-        params.compute_lgvi_inertia();
+        let dir = Path::new(work_dir.unwrap_or("."));
+        let params = Params::load(dir, &Initialization::read(dir)?)?;
         let params_dual = types::promote_params::<dual::Dual>(&params);
-
         Ok(DynamicsModel { params, params_dual })
     }
+
+    /// Gravitational constant G (km³/(kg·s²)).
+    #[getter]
+    fn g(&self) -> f64 { self.params.g }
+
+    /// Expansion order of the mutual potential.
+    #[getter]
+    fn order(&self) -> usize { self.params.n }
+
+    /// Primary mass T_a[0,0,0] (kg).
+    #[getter]
+    fn mass_a(&self) -> f64 { self.params.ta.get(0, 0, 0) }
+
+    /// Secondary mass T_b[0,0,0] (kg).
+    #[getter]
+    fn mass_b(&self) -> f64 { self.params.tb.get(0, 0, 0) }
+
+    /// Primary inertia tensor in its body frame (kg·km²), as rows.
+    #[getter]
+    fn inertia_a(&self) -> [[f64; 3]; 3] { self.params.ia }
+
+    /// Secondary inertia tensor in its body frame (kg·km²), as rows.
+    #[getter]
+    fn inertia_b(&self) -> [[f64; 3]; 3] { self.params.ib }
 
     /// Evaluate ẋ = f(x, t) and A = ∂f/∂x at a single point via exact AD.
     ///
@@ -1287,11 +954,16 @@ pub struct AugmentedDynamicsModel {
 #[cfg(feature = "extension-module")]
 #[pymethods]
 impl AugmentedDynamicsModel {
-    /// Build model from `ic_input.txt` in the current (or given) directory.
+    /// Build model from `ic_input.txt` and the inertia files it names, in
+    /// `work_dir` (default: the current directory).  The working directory of
+    /// the process is not changed.
     ///
     /// State layout: z = [x(30); θ_a(N_a); θ_b(N_b)]
     ///   θ_a = primary   T_a integrals at degrees [min_degree_a, max_degree_a]
     ///   θ_b = secondary T_b integrals at degrees [min_degree_b, max_degree_b]
+    ///
+    /// Raises ValueError if a degree range includes degree 1 or exceeds the
+    /// expansion order (see `check_theta_indices`).
     #[new]
     #[pyo3(signature = (min_degree_a=2, max_degree_a=2, min_degree_b=2, max_degree_b=2, work_dir=None))]
     fn new(
@@ -1299,52 +971,45 @@ impl AugmentedDynamicsModel {
         min_degree_b: usize, max_degree_b: usize,
         work_dir: Option<&str>,
     ) -> PyResult<Self> {
-        if let Some(dir) = work_dir {
-            std::env::set_current_dir(dir)
-                .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))?;
-        }
-        let ics = ic_read();
-        let mut order = ics.order.max(ics.order_a).max(ics.order_b);
-        if ics.a_shape == 2 { order = order.max(ics.order_a); }
-        if ics.b_shape == 2 { order = order.max(ics.order_b); }
-
-        let ta = Cube::load_csv(&format!("TDP_{}.csv", order))
-            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
-        let tb = Cube::load_csv(&format!("TDS_{}.csv", order))
-            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
-        let ia = load_moi_csv("IDP.csv")
-            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
-        let ib = load_moi_csv("IDS.csv")
-            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
-
-        let tk = tk_calc(order); let a = a_calc(order); let b = b_calc(order);
-        let mc = ta.get(0,0,0); let ms = tb.get(0,0,0);
-        let m  = mc * ms / (mc + ms); let nu = ms / (mc + ms);
-        let mean_motion = (ics.g*(ics.msun+mc+ms)/(ics.sol_rad*ics.au_def/1000.0).powi(3)).sqrt();
-        let n_hyp   = (ics.g*ics.mplanet/ics.a_hyp.abs().powi(3)).sqrt();
-        let n_helio = (ics.g*ics.msolar /ics.a_helio.abs().powi(3)).sqrt();
-        let mut params = Params {
-            g: ics.g, m, nu, ta, tb, ia, ib, n: order, tk, a, b,
-            flyby_toggle:ics.flyby_toggle, helio_toggle:ics.helio_toggle,
-            sg_toggle:ics.sg_toggle, tt_toggle:ics.tt_toggle,
-            mplanet:ics.mplanet, a_hyp:ics.a_hyp, e_hyp:ics.e_hyp, i_hyp:ics.i_hyp,
-            raan_hyp:ics.raan_hyp, om_hyp:ics.om_hyp, tau_hyp:ics.tau_hyp, n_hyp,
-            msolar:ics.msolar, a_helio:ics.a_helio, e_helio:ics.e_helio, i_helio:ics.i_helio,
-            raan_helio:ics.raan_helio, om_helio:ics.om_helio, tau_helio:ics.tau_helio, n_helio,
-            sol_rad:ics.sol_rad, au_def:ics.au_def, mean_motion,
-            love1:ics.love1, love2:ics.love2, refrad1:ics.refrad1, refrad2:ics.refrad2,
-            rho_a:ics.rho_a, rho_b:ics.rho_b, eps1:ics.eps1, eps2:ics.eps2,
-            ida:math3::ZERO_M, idb:math3::ZERO_M, msun:ics.msun,
-        };
-        params.compute_lgvi_inertia();
+        let dir = Path::new(work_dir.unwrap_or("."));
+        let params = Params::load(dir, &Initialization::read(dir)?)?;
 
         let theta_indices_a = stokes::inertia_indices(min_degree_a, max_degree_a);
         let theta_indices_b = stokes::inertia_indices(min_degree_b, max_degree_b);
+        for (label, idx) in [("primary", &theta_indices_a), ("secondary", &theta_indices_b)] {
+            check_theta_indices(idx, params.n).map_err(|e|
+                pyo3::exceptions::PyValueError::new_err(format!("{label}: {e}")))?;
+        }
         let n_aug = 30 + theta_indices_a.len() + theta_indices_b.len();
         let params_dual_base = types::promote_params::<dual::Dual>(&params);
 
         Ok(Self { params_dual_base, theta_indices_a, theta_indices_b, n_aug })
     }
+
+    /// Gravitational constant G (km³/(kg·s²)).
+    #[getter]
+    fn g(&self) -> f64 { self.params_dual_base.g.re }
+
+    /// Expansion order of the mutual potential.
+    #[getter]
+    fn order(&self) -> usize { self.params_dual_base.n }
+
+    /// Nominal primary mass T_a[0,0,0] (kg).
+    #[getter]
+    fn mass_a(&self) -> f64 { self.params_dual_base.ta.get(0, 0, 0).re }
+
+    /// Nominal secondary mass T_b[0,0,0] (kg).
+    #[getter]
+    fn mass_b(&self) -> f64 { self.params_dual_base.tb.get(0, 0, 0).re }
+
+    /// Nominal primary inertia tensor in its body frame (kg·km²), as rows.
+    /// [`eval`] and [`eval_stm`] use the tensor implied by the θ in z.
+    #[getter]
+    fn inertia_a(&self) -> [[f64; 3]; 3] { self.params_dual_base.ia.map(|r| r.map(|v| v.re)) }
+
+    /// Nominal secondary inertia tensor in its body frame (kg·km²), as rows.
+    #[getter]
+    fn inertia_b(&self) -> [[f64; 3]; 3] { self.params_dual_base.ib.map(|r| r.map(|v| v.re)) }
 
     /// Total augmented state dimension: 30 + N_a + N_b.
     #[getter]
@@ -1452,26 +1117,8 @@ impl AugmentedDynamicsModel {
     fn make_aug_dual_ode(&self)
         -> impl Fn(&[dual::Dual], f64) -> Vec<dual::Dual> + '_
     {
-        let pdb   = self.params_dual_base.clone();
-        let tidxa = self.theta_indices_a.clone();
-        let tidxb = self.theta_indices_b.clone();
-        let na    = tidxa.len();
-        move |z: &[dual::Dual], t: f64| -> Vec<dual::Dual> {
-            let mut pd = pdb.clone();
-            for (k, &(ii,jj,kk)) in tidxa.iter().enumerate() {
-                pd.ta.set(ii, jj, kk, z[30 + k]);
-            }
-            for (k, &(ii,jj,kk)) in tidxb.iter().enumerate() {
-                pd.tb.set(ii, jj, kk, z[30 + na + k]);
-            }
-            let mut x = [dual::Dual::from_re(0.0); 30];
-            for i in 0..30 { x[i] = z[i]; }
-            let xdot = dynamics::hou_ode(x, t, &pd);
-            let nb = tidxb.len();
-            let mut zdot = vec![dual::Dual::from_re(0.0); 30 + na + nb];
-            for i in 0..30 { zdot[i] = xdot[i]; }
-            zdot
-        }
+        move |z: &[dual::Dual], t: f64| dynamics::augmented_ode(
+            z, t, &self.params_dual_base, &self.theta_indices_a, &self.theta_indices_b)
     }
 }
 
@@ -1484,5 +1131,6 @@ fn gubas_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run_stm_augmented_both_py, m)?)?;
     m.add_class::<DynamicsModel>()?;
     m.add_class::<AugmentedDynamicsModel>()?;
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }
